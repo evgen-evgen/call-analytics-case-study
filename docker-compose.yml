@@ -1,0 +1,42 @@
+name: mtbank-ai-hiring
+
+services:
+  open-webui:
+    image: ghcr.io/open-webui/open-webui:main
+    container_name: mtbank-open-webui
+    restart: unless-stopped
+    environment:
+      ENABLE_API_KEYS: "true"
+      # RAG_EMBEDDING_ENGINE: openai
+      # RAG_EMBEDDING_MODEL: text-embedding-3-small
+      # BYPASS_EMBEDDING_AND_RETRIEVAL: "true"
+      # ENABLE_PERSISTENT_CONFIG: "false"
+    ports:
+      - "3001:8080"
+    volumes:
+      - open_webui_data:/app/backend/data
+    depends_on:
+      - pipelines
+
+  pipelines:
+    image: ghcr.io/open-webui/pipelines:main
+    container_name: mtbank-pipelines
+    restart: unless-stopped
+    environment:
+      PIPELINES_API_KEY: ${PIPELINES_API_KEY}
+      OPENWEBUI_BASE_URL: ${OPENWEBUI_BASE_URL}
+      OPENWEBUI_API_KEY: ${OPENWEBUI_API_KEY}
+
+      WHISPER_MODEL: ${WHISPER_MODEL} 
+      WHISPER_DEVICE: ${WHISPER_DEVICE}
+      WHISPER_COMPUTE_TYPE: ${WHISPER_COMPUTE_TYPE}
+      WHISPER_LANGUAGE: ${WHISPER_LANGUAGE}
+    ports:
+      - "9099:9099"
+    volumes:
+      - ./pipelines:/app/pipelines
+      - whisper_cache:/root/.cache/huggingface
+
+volumes:
+  open_webui_data:
+  whisper_cache:

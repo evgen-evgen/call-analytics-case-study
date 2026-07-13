@@ -19,24 +19,39 @@ services:
       - pipelines
 
   pipelines:
-    image: ghcr.io/open-webui/pipelines:main
+    build:
+      context: .
+      dockerfile: Dockerfile.pipelines
+      # BuildKit's bridge traffic is intercepted by the local Tailscale policy
+      # routes. Host networking is used only while installing build packages.
+      network: host
+
     container_name: mtbank-pipelines
     restart: unless-stopped
+
     environment:
       PIPELINES_API_KEY: ${PIPELINES_API_KEY}
+
       OPENWEBUI_BASE_URL: ${OPENWEBUI_BASE_URL}
       OPENWEBUI_API_KEY: ${OPENWEBUI_API_KEY}
 
-      WHISPER_MODEL: ${WHISPER_MODEL} 
+      WHISPER_MODEL: ${WHISPER_MODEL}
       WHISPER_DEVICE: ${WHISPER_DEVICE}
       WHISPER_COMPUTE_TYPE: ${WHISPER_COMPUTE_TYPE}
       WHISPER_LANGUAGE: ${WHISPER_LANGUAGE}
+
+      HF_TOKEN: ${HF_TOKEN}
+      DIARIZATION_MODEL: ${DIARIZATION_MODEL}
+      DIARIZATION_DEVICE: ${DIARIZATION_DEVICE}
+
     ports:
       - "9099:9099"
+
     volumes:
       - ./pipelines:/app/pipelines
-      - whisper_cache:/root/.cache/huggingface
+      - ./app:/app/app
+      - huggingface_cache:/root/.cache/huggingface
 
 volumes:
   open_webui_data:
-  whisper_cache:
+  huggingface_cache:

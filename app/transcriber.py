@@ -2,7 +2,7 @@ from pathlib import Path
 
 from faster_whisper import WhisperModel
 
-from pipelines.app.schemas import TranscriptSegment
+from app.schemas import (RawTranscriptSegment, WordTImeStamp)
 
 
 class TranscriptionError(RuntimeError):
@@ -34,7 +34,8 @@ class Transcriber:
     def run(
         self,
         audio_path: Path,
-    ) -> list[TranscriptSegment]:
+    ) -> list[
+        RawTranscriptSegment]:
         if self.model is None:
             raise TranscriptionError(
                 "Whisper model is not loaded."
@@ -55,20 +56,39 @@ class Transcriber:
                 condition_on_previous_text=True,
             )
 
-            result: list[TranscriptSegment] = []
+            result: list[RawTranscriptSegment] = []
 
             # Inference actually starts during iteration.
             for segment in segments:
-                text = segment.text.strip()
+                segment_text = segment.text.strip()
+                words: list[WordTImeStamp] = []
 
-                if not text:
+                for word in segment.words or []:
+                    word_text = word.word.strip()
+
+                    if not word_text:
+                        continue
+
+                    if word.start is None or word.end is None:
+                        continue
+
+                    words.append(
+                        WordTImeStamp(
+                            start=round(float(word.start), 3),
+                            end=round(float(word.end), 3),
+                            text=word_text,
+                        )
+                    )
+
+                if not segment_text and not words:
                     continue
 
                 result.append(
-                    TranscriptSegment(
-                        start=round(float(segment.start), 2),
-                        end=round(float(segment.end), 2),
-                        text=text,
+                    RawTranscriptSegment(
+                        start=round(float(segment.start), 3),
+                        end=round(float(segment.end), 3),
+                        text=segment_text,
+                        words=words,
                     )
                 )
 

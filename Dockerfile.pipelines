@@ -1,0 +1,18 @@
+
+FROM ghcr.io/open-webui/pipelines:main
+
+USER root
+
+# pyannote.audio / torchcodec require system FFmpeg.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+        ffmpeg \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY requirements.txt /tmp/requirements.txt
+
+RUN pip install --no-cache-dir \
+    -r /tmp/requirements.txt \
+    && rm /tmp/requirements.txt
+
+WORKDIR /app

@@ -5,7 +5,7 @@ from pathlib import Path
 
 import httpx
 
-from pipelines.app.schemas import AudioSource
+from app.schemas import AudioSource
 
 
 FILE_TAG_PATTERN = re.compile(

@@ -5,7 +5,6 @@ date: 2026-07-11
 version: 0.1.0
 license: MIT
 description: Diagnostic pipeline for inspecting OpenWebUI audio attachments.
-requirements: faster-whisper>=1.2.1
 """
 import os
 import json
@@ -15,17 +14,26 @@ from typing import Any, Generator, Iterator, Union
 import httpx
 from pydantic import BaseModel, Field
 
-from pipelines.app.audio_source import (
+from app.audio_source import (
     AudioSourceError,
     OpenWebUIAudioDownloader,
     extract_audio_source,
 )
 
-from pipelines.app.transcriber import (
+from app.transcriber import (
     Transcriber,
     TranscriptionError,
 )
 
+from app.diarizer import (
+    Diarizer,
+    DiarizationError,
+)
+
+from app.aligner import (
+    AlignmentError,
+    TranscriptAligner,
+)
 class Pipeline:
     class Valves(BaseModel):
         WHISPER_MODEL: str = Field(
@@ -57,6 +65,12 @@ class Pipeline:
             default=20_000,
             description="Maximum number of characters returned in debug output.",
         )
+        DIARIZATION_MODEL: str = Field(
+             default="pyannote/speaker-diarization-community-1",
+        )
+        DIARIZATION_DEVICE: str = Field(
+            default="cpu",
+        )
 
     def __init__(self) -> None:
         self.name = "MTBank ASR"
@@ -67,9 +81,13 @@ class Pipeline:
             WHISPER_LANGUAGE=os.getenv("WHISPER_LANGUAGE", "ru"),
             OPENWEBUI_BASE_URL=os.getenv("OPENWEBUI_BASE_URL", "http://open-webui:8080"),
             DEBUG_OUTPUT_MAX_LENGTH=int(os.getenv("DEBUG_OUTPUT_MAX_LENGTH", "20000")),
+            DIARIZATION_MODEL=os.getenv("DIARIZATION_MODEL", "pyannote/speaker-diarization-community-1"),
+            DIARIZATION_DEVICE=os.getenv("DIARIZATION_DEVICE", "cpu"),
         )
         self.downloader: OpenWebUIAudioDownloader | None = None
         self.transcriber: Transcriber | None = None
+        self.diarizer: Diarizer | None = None
+        self.aligner = TranscriptAligner (merge_gap_seconds=1.0)
 
     async def on_startup(self) -> None:
         self.downloader = OpenWebUIAudioDownloader(
@@ -82,6 +100,18 @@ class Pipeline:
             compute_type=self.valves.WHISPER_COMPUTE_TYPE,
             language=self.valves.WHISPER_LANGUAGE,
         )
+
+        self.diarizer = Diarizer(
+            model_name=self.valves.DIARIZATION_MODEL,
+            device=self.valves.DIARIZATION_DEVICE,
+            hf_token=os.getenv("HF_TOKEN"),
+            num_speakers=2,
+        )
+        print(
+            "Loading pyannote diarization model: "
+            f"{self.valves.DIARIZATION_MODEL}"
+        )
+
         print(
             "Loading faster-whisper model: "
             f"model={self.valves.WHISPER_MODEL}, "
@@ -89,15 +119,17 @@ class Pipeline:
             f"compute_type={self.valves.WHISPER_COMPUTE_TYPE}"
         )
 
-        # Loading is synchronous and can download model weights.
-        # Startup happens once, so the model is not reloaded per request.
+        
         self.transcriber.load()
+        self.diarizer.load()
 
         print("MTBank ASR pipeline started successfully.")
 
     async def on_shutdown(self) -> None:
         if self.transcriber is not None:
             self.transcriber.unload()
+        if self.diarizer is not None:
+            self.diarizer.unload()
 
         print("MTBank ASR pipeline stopped.")
 
@@ -136,24 +168,46 @@ class Pipeline:
 
         if self.transcriber is None:
             return "Ошибка faster-whisper не инициализирован."
+        
+        if self.diarizer is None:
+            return "Ошибка diarizer не инициализирован."
 
         temporary_path: Path | None = None
 
         try:
             source = extract_audio_source(user_message)
             temporary_path = self.downloader.download(source)
-            size_bytes = temporary_path.stat().st_size
+            # size_bytes = temporary_path.stat().st_size
+            diarization =self.diarizer.run(temporary_path)
             transcript = self.transcriber.run(temporary_path)
+            aligned_transcript = self.aligner.align(transcript, diarization)
 
 
             response = {
                 "filename": source.filename,
                 "content_type": source.content_type,
-                "model": self.valves.WHISPER_MODEL,
-                "segments": [
-                    segment.model_dump()
-                    for segment in transcript
-                ],
+                "whisper": {
+                    "model": self.valves.WHISPER_MODEL,
+                    "segments": [
+                        segment.model_dump()
+                        for segment in transcript
+                    ],
+                    },
+                "diarization": {
+                    "model": self.valves.DIARIZATION_MODEL,
+                    "num_speakers": 2,
+                    "segments": [
+                        segment.model_dump()
+                        for segment in diarization
+                    ],
+                        },
+                "aligned_transcript": {
+                    "segments": [
+                        segment.model_dump()
+                        for segment in aligned_transcript
+                    ],
+                },
+            
             }
 
             formatted_json = json.dumps(
@@ -198,6 +252,18 @@ class Pipeline:
                 "## Неожиданная ошибка\n\n"
                 f"Type: `{type(exc).__name__}`\n\n"
                 f"Message: `{exc}`"
+            )
+        
+        except DiarizationError as exc:
+            return (
+                "## Ошибка диаризации\n\n"
+                f"{exc}"
+            )
+        
+        except AlignmentError as exc:
+            return (
+                "## Ошибка выравнивания транскрипта\n\n"
+                f"{exc}"
             )
 
         finally:

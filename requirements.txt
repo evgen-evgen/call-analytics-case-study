@@ -9,3 +9,5 @@ torchcodec>=0.6,<0.8
 # Keep the OpenCV dependency already present in the base image compatible.
 numpy>=2,<2.3
 openai>=1.68.0
+pytest>=8.0.0
+pytest-asyncio>=0.23.0

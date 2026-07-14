@@ -9,12 +9,15 @@ services:
       ENABLE_API_KEYS: "true"
       BYPASS_EMBEDDING_AND_RETRIEVAL: "true"
       ENABLE_PERSISTENT_CONFIG: "false"
-      DEFAULT_MODELS: mtbank_progress
-      DEFAULT_PINNED_MODELS: mtbank_progress
+      DEFAULT_MODELS: mtbank_asr
+      DEFAULT_PINNED_MODELS: mtbank_asr
       OPENAI_API_BASE_URL: http://pipelines:9099/v1
       OPENAI_API_KEY: ${PIPELINES_API_KEY}
       WEBUI_SECRET_KEY: ${PIPELINES_API_KEY}
       ENABLE_EVALUATION_ARENA_MODELS: "false"
+      DEFAULT_PROMPT_SUGGESTIONS: "null"
+      DEFAULT_USER_ROLE: user
+      ENABLE_SIGNUP: "true" 
     ports:
       - "3001:8080"
     volumes:

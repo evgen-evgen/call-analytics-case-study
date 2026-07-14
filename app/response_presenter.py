@@ -31,7 +31,16 @@ class ResponsePresenter:
         summary = analysis.summary
 
         quality_issues = self._format_list(
-            quality.issues,
+            [
+                criterion.reason
+                for criterion in (
+                    checklist.greeting,
+                    checklist.need_identification,
+                    checklist.solution,
+                    checklist.farewell,
+                )
+                if not criterion.passed
+            ],
             empty_text="Замечаний нет.",
         )
         compliance_issues = self._format_compliance_issues(
@@ -53,11 +62,11 @@ class ResponsePresenter:
             f"- **Приоритет:** {analysis.classification.priority.value}\n"
             f"- **Обоснование:** {analysis.classification.reasoning}\n\n"
             "## Качество обслуживания\n\n"
-            f"- **Оценка:** {quality.total}/100\n"
-            f"- **Приветствие:** {self._yes_no(checklist.greeting)}\n"
-            f"- **Выявление потребности:** {self._yes_no(checklist.need_detection)}\n"
-            f"- **Решение предложено:** {self._yes_no(checklist.solution_provided)}\n"
-            f"- **Прощание:** {self._yes_no(checklist.farewell)}\n\n"
+            f"- **Оценка:** {quality.score}/100\n"
+            f"- **Приветствие:** {self._yes_no(checklist.greeting.passed)}\n"
+            f"- **Выявление потребности:** {self._yes_no(checklist.need_identification.passed)}\n"
+            f"- **Решение предложено:** {self._yes_no(checklist.solution.passed)}\n"
+            f"- **Прощание:** {self._yes_no(checklist.farewell.passed)}\n\n"
             "### Замечания\n\n"
             f"{quality_issues}\n\n"
             "## Compliance\n\n"

@@ -11,18 +11,24 @@ from app.schemas import (
     ClassificationResult,
     ComplianceResult,
     QualityResult,
-    SummaryResult,
+    SummaryAssessment,
     TranscriptSegment,
 )
 
 
+from app.services import (
+    calculate_quality_result,
+    validate_quality_evidence,
+    build_compliance_result,
+    validate_compliance_evidence,
+    normalize_summary_result,
+)
 class AnalysisResult(BaseModel):
     transcript: list[TranscriptSegment]
     classification: ClassificationResult
     quality: QualityResult
     compliance: ComplianceResult
-    summary: SummaryResult
-
+    summary: SummaryAssessment
 
 class AnalysisSupervisor:
     def __init__(
@@ -39,18 +45,30 @@ class AnalysisSupervisor:
         transcript: list[TranscriptSegment],
     ) -> AnalysisResult:
         tasks = [
-            asyncio.create_task(self.classifier.run(transcript)),
-            asyncio.create_task(self.quality.run(transcript)),
-            asyncio.create_task(self.compliance.run(transcript)),
-            asyncio.create_task(self.summarizer.run(transcript)),
+            asyncio.create_task(
+                self.classifier.run(transcript),
+                name="classification_agent",
+            ),
+            asyncio.create_task(
+                self.quality.run(transcript),
+                name="quality_agent",
+            ),
+            asyncio.create_task(
+                self.compliance.run(transcript),
+                name="compliance_agent",
+            ),
+            asyncio.create_task(
+                self.summarizer.run(transcript),
+                name="summarizer_agent",
+            ),
         ]
 
         try:
             (
                 classification,
-                quality,
-                compliance,
-                summary,
+                quality_assessment,
+                compliance_assessment,
+                summary_assessment,
             ) = await asyncio.gather(*tasks)
         except BaseException:
             for task in tasks:
@@ -58,6 +76,29 @@ class AnalysisSupervisor:
                     task.cancel()
             await asyncio.gather(*tasks, return_exceptions=True)
             raise
+
+        quality_assessment = validate_quality_evidence(
+            quality_assessment,
+            transcript,
+        )
+
+        quality = calculate_quality_result(
+            quality_assessment
+        )
+
+        compliance_assessment = (
+            validate_compliance_evidence(
+                compliance_assessment,
+                transcript,
+            )
+        )
+
+        compliance = build_compliance_result(
+            compliance_assessment
+        )
+        summary = normalize_summary_result(
+            summary_assessment
+        )
 
         return AnalysisResult(
             transcript=transcript,

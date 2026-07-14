@@ -1,25 +1,51 @@
-from typing import Any, Dict, List
+from app.agents.base import BaseAgent
+from app.schemas import (
+    ClassificationResult,
+    TranscriptSegment,
+)
 
 
-def classify(transcript: List[Dict[str, Any]]) -> Dict[str, Any]:
-    text = " ".join(item.get("text", "") for item in transcript).lower()
+CLASSIFIER_SYSTEM_PROMPT = """
+Ты анализируешь телефонные обращения клиентов банка.
 
-    if "кредит" in text:
-        topic = "кредиты"
-    elif "карт" in text:
-        topic = "карты"
-    elif "перев" in text:
-        topic = "переводы"
-    elif "жалоб" in text or "проблем" in text:
-        topic = "жалобы"
-    else:
-        topic = "другое"
+Твоя задача:
+1. Определить основную тему обращения.
+2. Определить приоритет обработки.
 
-    if topic in {"кредиты", "жалобы"}:
-        priority = "high"
-    elif topic == "карты":
-        priority = "medium"
-    else:
-        priority = "low"
+Допустимые темы:
+- кредиты
+- карты
+- переводы
+- жалобы
+- другое
 
-    return {"topic": topic, "priority": priority}
+Правила приоритета:
+- high: возможное мошенничество, потеря денег,
+  заблокированный доступ, срочная жалоба,
+  угроза безопасности или существенный финансовый риск;
+- medium: проблема требует действий банка или последующий контакт,
+  но нет немедленной угрозы;
+- low: информационный вопрос,
+  консультация или обычное уточнение.
+
+Используй только информацию из транскрипта.
+Не придумывай отсутствующие обстоятельства.
+Если обсуждаются несколько тем, выбери основную.
+Верни результат строго по переданной JSON Schema.
+""".strip()
+
+
+class ClassificationAgent(
+    BaseAgent[ClassificationResult]
+):
+    result_model = ClassificationResult
+    system_prompt = CLASSIFIER_SYSTEM_PROMPT
+
+    def build_user_prompt(
+        self,
+        transcript: list[TranscriptSegment],
+    ) -> str:
+        return (
+            "Классифицируй следующий разговор:\n\n"
+            f"{self.format_transcript(transcript)}"
+        )

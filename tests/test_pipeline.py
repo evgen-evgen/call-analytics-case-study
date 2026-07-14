@@ -1,16 +1,68 @@
-from pathlib import Path
+import asyncio
+import threading
+from types import MethodType
 
-from pipeline import Pipeline
+from pipelines.pipeline import Pipeline
 
 
-def test_pipeline_returns_structured_analysis(tmp_path):
-    audio_path = tmp_path / "demo.wav"
-    audio_path.write_bytes(b"fake-audio-bytes")
+def test_pipeline_requires_async_startup() -> None:
+    pipeline = Pipeline()
 
-    pipeline = Pipeline(whisper_model="base")
-    result = pipeline.analyze(str(audio_path))
+    result = pipeline.pipe(
+        user_message="",
+        model_id="test",
+        messages=[],
+        body={},
+    )
 
-    assert result["transcript"][0]["speaker"] in {"Оператор", "Клиент"}
-    assert result["classification"]["topic"] in {"кредиты", "карты", "переводы", "жалобы", "другое"}
-    assert result["quality_score"]["total"] >= 0
-    assert result["compliance"]["passed"] in {True, False}
+    assert result == "Pipeline не был корректно инициализирован."
+
+
+def test_pipeline_streams_progress_before_final_result() -> None:
+    pipeline = Pipeline()
+    pipeline.downloader = object()
+    pipeline.transcriber = object()
+    pipeline.diarizer = object()
+
+    loop = asyncio.new_event_loop()
+    thread = threading.Thread(target=loop.run_forever)
+    thread.start()
+    pipeline._event_loop = loop
+
+    async def fake_pipe_async(
+        self,
+        user_message,
+        model_id,
+        messages,
+        body,
+        progress=None,
+    ):
+        progress("Файл получен.\n\n")
+        await asyncio.sleep(0.01)
+        progress("Анализ готов.\n\n")
+        return "FINAL"
+
+    pipeline._pipe_async = MethodType(
+        fake_pipe_async,
+        pipeline,
+    )
+
+    try:
+        chunks = list(
+            pipeline.pipe(
+                user_message="<file />",
+                model_id="test",
+                messages=[],
+                body={"stream": True},
+            )
+        )
+    finally:
+        loop.call_soon_threadsafe(loop.stop)
+        thread.join()
+        loop.close()
+
+    assert chunks == [
+        "Файл получен.\n\n",
+        "Анализ готов.\n\n",
+        "FINAL",
+    ]

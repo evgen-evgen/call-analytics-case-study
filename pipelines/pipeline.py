@@ -4,20 +4,26 @@ author: Evgeni Basov
 date: 2026-07-11
 version: 0.1.0
 license: MIT
-description: Diagnostic pipeline for inspecting OpenWebUI audio attachments.
+description: MTBank ASR pipeline for processing OpenWebUI audio attachments.
 """
 import os
 import json
+import logging
+import asyncio
+import queue
+from time import perf_counter
+from uuid import uuid4
 from pathlib import Path
-from typing import Any, Generator, Iterator, Union
+from typing import Any, Callable, Generator, Iterator, Union
 
 import httpx
 from pydantic import BaseModel, Field
+from app.schemas import AudioSource
 
 from app.audio_source import (
     AudioSourceError,
     OpenWebUIAudioDownloader,
-    extract_audio_source,
+    find_audio_source,
 )
 
 from app.transcriber import (
@@ -34,6 +40,31 @@ from app.aligner import (
     AlignmentError,
     TranscriptAligner,
 )
+
+from app.audio_normalizer import (
+    AudioNormalizer,
+    AudioNormalizationError,
+)
+
+from app.observability import (
+    bind_request_id,
+    configure_logging,
+    log_event,
+    operation,
+    reset_request_id,
+)
+
+from app.role_mapper import SpeakerRoleMapper
+from app.agents.supervisor import AnalysisResult, AnalysisSupervisor
+from app.schemas import TranscriptSegment
+from app.llm.client import LLMClient
+from app.agents.analysis_chat import AnalysisChatAgent
+from app.response_presenter import ResponsePresenter
+
+
+
+ANALYSIS_MARKER = "<!-- MTBANK_ANALYSIS_RESULT -->"
+
 class Pipeline:
     class Valves(BaseModel):
         WHISPER_MODEL: str = Field(
@@ -73,6 +104,7 @@ class Pipeline:
         )
 
     def __init__(self) -> None:
+        configure_logging()
         self.name = "MTBank ASR"
         self.valves = self.Valves(
             WHISPER_MODEL=os.getenv("WHISPER_MODEL", "medium"),
@@ -88,8 +120,23 @@ class Pipeline:
         self.transcriber: Transcriber | None = None
         self.diarizer: Diarizer | None = None
         self.aligner = TranscriptAligner (merge_gap_seconds=1.0)
+        self.audio_normalizer = AudioNormalizer(
+                        sample_rate=16_000,
+                        channels=1,
+        )
+        self.role_mapper = SpeakerRoleMapper()
+        self.llm_client: LLMClient | None = None
+        self.supervisor: AnalysisSupervisor | None = None
+        self.chat_agent: AnalysisChatAgent | None = None
+        self.presenter = ResponsePresenter()
+        self._event_loop: asyncio.AbstractEventLoop | None = None
 
     async def on_startup(self) -> None:
+        self._event_loop = asyncio.get_running_loop()
+        self.llm_client = LLMClient()
+        self.supervisor = AnalysisSupervisor(self.llm_client)
+        self.chat_agent = AnalysisChatAgent(self.llm_client)
+
         self.downloader = OpenWebUIAudioDownloader(
             base_url=self.valves.OPENWEBUI_BASE_URL,
         )
@@ -107,31 +154,40 @@ class Pipeline:
             hf_token=os.getenv("HF_TOKEN"),
             num_speakers=2,
         )
-        print(
-            "Loading pyannote diarization model: "
-            f"{self.valves.DIARIZATION_MODEL}"
+        log_event(
+            "pipeline.starting",
+            whisper_model=self.valves.WHISPER_MODEL,
+            whisper_device=self.valves.WHISPER_DEVICE,
+            diarization_model=self.valves.DIARIZATION_MODEL,
+            diarization_device=self.valves.DIARIZATION_DEVICE,
         )
 
-        print(
-            "Loading faster-whisper model: "
-            f"model={self.valves.WHISPER_MODEL}, "
-            f"device={self.valves.WHISPER_DEVICE}, "
-            f"compute_type={self.valves.WHISPER_COMPUTE_TYPE}"
-        )
+        with operation(
+            "model.load.whisper",
+            model=self.valves.WHISPER_MODEL,
+            device=self.valves.WHISPER_DEVICE,
+        ):
+            self.transcriber.load()
 
-        
-        self.transcriber.load()
-        self.diarizer.load()
+        with operation(
+            "model.load.diarization",
+            model=self.valves.DIARIZATION_MODEL,
+            device=self.valves.DIARIZATION_DEVICE,
+        ):
+            self.diarizer.load()
 
-        print("MTBank ASR pipeline started successfully.")
+        log_event("pipeline.started")
 
     async def on_shutdown(self) -> None:
         if self.transcriber is not None:
             self.transcriber.unload()
         if self.diarizer is not None:
             self.diarizer.unload()
+        if self.llm_client is not None:
+            await self.llm_client.client.close()
+        self._event_loop = None
 
-        print("MTBank ASR pipeline stopped.")
+        log_event("pipeline.stopped")
 
 
     async def on_valves_updated(self) -> None:
@@ -168,72 +224,104 @@ class Pipeline:
 
         if self.transcriber is None:
             return "Ошибка faster-whisper не инициализирован."
-        
+
         if self.diarizer is None:
             return "Ошибка diarizer не инициализирован."
 
-        temporary_path: Path | None = None
+        if body.get("stream"):
+            return self._stream_async(
+                user_message=user_message,
+                model_id=model_id,
+                messages=messages,
+                body=body,
+            )
+
+        return self._run_async(
+            self._pipe_async(
+                user_message=user_message,
+                model_id=model_id,
+                messages=messages,
+                body=body,
+            )
+        )
+
+    async def _pipe_async(
+        self,
+        user_message: str,
+        model_id: str,
+        messages: list[dict[str, Any]],
+        body: dict[str, Any],
+        progress: Callable[[str], None] | None = None,
+    ) -> str:
+
+        request_token = bind_request_id(str(uuid4()))
+        request_started_at = perf_counter()
+        outcome = "failed"
+
+        log_event(
+            "request.started",
+            model_id=model_id,
+            stream=bool(body.get("stream")),
+        )
 
         try:
-            source = extract_audio_source(user_message)
-            temporary_path = self.downloader.download(source)
-            # size_bytes = temporary_path.stat().st_size
-            diarization =self.diarizer.run(temporary_path)
-            transcript = self.transcriber.run(temporary_path)
-            aligned_transcript = self.aligner.align(transcript, diarization)
+            with operation("audio.source.extract"):
+                source = find_audio_source(user_message)
 
+            if source is not None:
+                result = await self._process_audio(
+                    source,
+                    progress=progress,
+                )
+            else:
+                previous_analysis = self._extract_latest_analysis(
+                    messages
+                )
 
-            response = {
-                "filename": source.filename,
-                "content_type": source.content_type,
-                "whisper": {
-                    "model": self.valves.WHISPER_MODEL,
-                    "segments": [
-                        segment.model_dump()
-                        for segment in transcript
-                    ],
-                    },
-                "diarization": {
-                    "model": self.valves.DIARIZATION_MODEL,
-                    "num_speakers": 2,
-                    "segments": [
-                        segment.model_dump()
-                        for segment in diarization
-                    ],
-                        },
-                "aligned_transcript": {
-                    "segments": [
-                        segment.model_dump()
-                        for segment in aligned_transcript
-                    ],
-                },
-            
-            }
+                if previous_analysis is not None:
+                    result = await self._answer_text(
+                        user_message=user_message,
+                        analysis=previous_analysis,
+                    )
+                elif user_message.strip():
+                    result = await self._answer_text(
+                        user_message=user_message,
+                    )
+                else:
+                    result = self._format_welcome_message()
 
-            formatted_json = json.dumps(
-                response,
-                ensure_ascii=False,
-                indent=2,
+            outcome = "completed"
+            return result
+
+        except Exception as exc:
+            return self._format_error(exc)
+
+        finally:
+            log_event(
+                "request.finished",
+                outcome=outcome,
+                duration_ms=round(
+                    (perf_counter() - request_started_at) * 1000,
+                    2,
+                ),
             )
+            reset_request_id(request_token)
 
-            return (
-                "## Транскрипт\n\n"
-                f"```json\n{formatted_json}\n```"
-            )
-
-        except AudioSourceError as exc:
+    @staticmethod
+    def _format_error(exc: Exception) -> str:
+        if isinstance(exc, AudioSourceError):
             return (
                 "## Ошибка входного файла\n\n"
                 f"{exc}"
             )
 
-        except TranscriptionError as exc:
+        if isinstance(exc, TranscriptionError):
             return (
                 "## Ошибка транскрибации\n\n"
                 f"{exc}"
             )
 
-        except httpx.HTTPStatusError as exc:
+        if isinstance(exc, httpx.HTTPStatusError):
             return (
                 "## Ошибка загрузки файла\n\n"
                 f"OpenWebUI API status: "
@@ -241,31 +329,309 @@ class Pipeline:
                 f"Response: `{exc.response.text[:500]}`"
             )
 
-        except httpx.RequestError as exc:
+        if isinstance(exc, httpx.RequestError):
             return (
                 "## Ошибка подключения к OpenWebUI\n\n"
                 f"`{exc}`"
             )
 
-        except Exception as exc:
-            return (
-                "## Неожиданная ошибка\n\n"
-                f"Type: `{type(exc).__name__}`\n\n"
-                f"Message: `{exc}`"
-            )
-        
-        except DiarizationError as exc:
+        if isinstance(exc, DiarizationError):
             return (
                 "## Ошибка диаризации\n\n"
                 f"{exc}"
             )
-        
-        except AlignmentError as exc:
+
+        if isinstance(exc, AlignmentError):
             return (
                 "## Ошибка выравнивания транскрипта\n\n"
                 f"{exc}"
             )
 
+        if isinstance(exc, AudioNormalizationError):
+            return (
+                "## Ошибка подготовки аудио\n\n"
+                f"{exc}"
+            )
+
+        log_event(
+            "request.unexpected_error",
+            level=logging.ERROR,
+            exc_info=True,
+            error_type=type(exc).__name__,
+            error_message=str(exc),
+        )
+        return (
+            "## Неожиданная ошибка\n\n"
+            f"Type: `{type(exc).__name__}`\n\n"
+            f"Message: `{exc}`"
+        )
+
+    async def _process_audio(
+        self,
+        source: AudioSource,
+        *,
+        progress: Callable[[str], None] | None = None,
+    ) -> str:
+        downloaded_path: Path | None = None
+        normalized_path: Path | None = None
+
+        try:
+            self._report_progress(progress, "file_received")
+
+            with operation(
+                "audio.download",
+                content_type=source.content_type,
+            ):
+                downloaded_path = await asyncio.to_thread(
+                    self.downloader.download,
+                    source,
+                )
+
+            with operation("audio.normalize"):
+                normalized_path = await asyncio.to_thread(
+                    self.audio_normalizer.normalize,
+                    downloaded_path,
+                )
+
+            self._report_progress(progress, "audio_prepared")
+
+            with operation(
+                "audio.transcribe",
+                model=self.valves.WHISPER_MODEL,
+            ):
+                raw_transcript = await asyncio.to_thread(
+                    self.transcriber.run,
+                    normalized_path,
+                )
+
+            self._report_progress(
+                progress,
+                "transcription_completed",
+            )
+
+            log_event(
+                "transcript.created",
+                segment_count=len(raw_transcript),
+                word_count=sum(
+                    len(segment.words)
+                    for segment in raw_transcript
+                ),
+            )
+
+            with operation(
+                "audio.diarize",
+                model=self.valves.DIARIZATION_MODEL,
+            ):
+                diarization = await asyncio.to_thread(
+                    self.diarizer.run,
+                    normalized_path,
+                )
+
+            self._report_progress(
+                progress,
+                "diarization_completed",
+            )
+
+            log_event(
+                "diarization.created",
+                segment_count=len(diarization),
+                speaker_count=len({
+                    segment.speaker
+                    for segment in diarization
+                }),
+            )
+
+            with operation("transcript.align"):
+                aligned_transcript = await asyncio.to_thread(
+                    self.aligner.align,
+                    transcript=raw_transcript,
+                    diarization=diarization,
+                )
+
+            with operation("transcript.map_roles"):
+                final_transcript = await asyncio.to_thread(
+                    self.role_mapper.map_roles,
+                    aligned_transcript,
+                )
+
+            self._report_progress(progress, "analysis_started")
+            analysis = await self._run_analysis(
+                final_transcript
+            )
+            self._report_progress(progress, "analysis_completed")
+
+            # response = {
+            #     "transcript": [
+            #         segment.model_dump()
+            #         for segment in final_transcript
+            #     ],
+            #     "classification": (
+            #         analysis.classification.model_dump()
+            #     ),
+            #     "quality_score": analysis.quality.model_dump(),
+            #     "compliance": analysis.compliance.model_dump(),
+            #     "summary": analysis.summary.summary,
+            #     "action_items": analysis.summary.action_items,
+            # }
+            formatted_json = json.dumps(
+                analysis.model_dump(),
+                ensure_ascii=False,
+                indent=2,
+            )
+
+            return (
+                f"{ANALYSIS_MARKER}\n"
+                "## Анализ звонка\n\n"
+                "```json\n"
+                f"{formatted_json}\n"
+                "```"
+            )
+
         finally:
-            if temporary_path is not None:
-                temporary_path.unlink(missing_ok=True)
+            if downloaded_path is not None:
+                downloaded_path.unlink(missing_ok=True)
+
+            if (
+                normalized_path is not None
+                and normalized_path != downloaded_path
+            ):
+                normalized_path.unlink(missing_ok=True)
+
+    async def _run_analysis(
+        self,
+        transcript: list[TranscriptSegment],
+    ) -> AnalysisResult:
+        if self.supervisor is None:
+            raise RuntimeError(
+                "Analysis supervisor is not initialized."
+            )
+
+        with operation("agents.analyze"):
+            return await self.supervisor.run(transcript)
+
+    def _format_welcome_message(self) -> str:
+        return (
+            "## Анализ банковского звонка\n\n"
+            "Загрузите аудиофайл в формате WAV, MP3 или OGG.\n\n"
+            "Система выполнит:\n\n"
+            "- транскрибацию с временными метками;\n"
+            "- разделение на Оператора и Клиента;\n"
+            "- классификацию обращения;\n"
+            "- оценку качества оператора;\n"
+            "- compliance-проверку;\n"
+            "- суммаризацию и формирование action items.\n\n"
+            "После получения анализа можно задавать "
+            "дополнительные вопросы по звонку."
+        )
+
+    def _extract_latest_analysis(
+        self,
+        messages: list[dict[str, Any]],
+    ) -> str | None:
+        for message in reversed(messages):
+            if message.get("role") != "assistant":
+                continue
+
+            content = self._message_content(message)
+
+            if ANALYSIS_MARKER in content:
+                return content.replace(
+                    ANALYSIS_MARKER,
+                    "",
+                    1,
+                ).strip()
+
+        return None
+
+    @staticmethod
+    def _message_content(
+        message: dict[str, Any],
+    ) -> str:
+        content = message.get("content", "")
+
+        if isinstance(content, str):
+            return content
+
+        if isinstance(content, list):
+            parts: list[str] = []
+
+            for item in content:
+                if not isinstance(item, dict):
+                    continue
+
+                if item.get("type") == "text":
+                    parts.append(
+                        str(item.get("text", ""))
+                    )
+
+            return "\n".join(parts)
+
+        return str(content)
+
+    async def _answer_text(
+        self,
+        *,
+        user_message: str,
+        analysis: str | None = None,
+    ) -> str:
+        if self.chat_agent is None:
+            raise RuntimeError(
+                "Analysis chat agent is not initialized."
+            )
+
+        return await self.chat_agent.run(
+            question=user_message,
+            analysis_context=analysis,
+        )
+
+    def _run_async(self, coroutine: Any) -> Any:
+        if self._event_loop is None:
+            coroutine.close()
+            raise RuntimeError(
+                "Pipeline event loop is not initialized."
+            )
+
+        return asyncio.run_coroutine_threadsafe(
+            coroutine,
+            self._event_loop,
+        ).result()
+
+    def _stream_async(
+        self,
+        *,
+        user_message: str,
+        model_id: str,
+        messages: list[dict[str, Any]],
+        body: dict[str, Any],
+    ) -> Iterator[str]:
+        if self._event_loop is None:
+            yield "## Ошибка\n\nPipeline event loop is not initialized."
+            return
+
+        progress_queue: queue.Queue[str] = queue.Queue()
+        future = asyncio.run_coroutine_threadsafe(
+            self._pipe_async(
+                user_message=user_message,
+                model_id=model_id,
+                messages=messages,
+                body=body,
+                progress=progress_queue.put,
+            ),
+            self._event_loop,
+        )
+
+        while not future.done() or not progress_queue.empty():
+            try:
+                yield progress_queue.get(timeout=0.25)
+            except queue.Empty:
+                continue
+
+        yield future.result()
+
+    def _report_progress(
+        self,
+        callback: Callable[[str], None] | None,
+        event: str,
+    ) -> None:
+        if callback is not None:
+            callback(self.presenter.format_progress(event))

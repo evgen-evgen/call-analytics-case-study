@@ -59,7 +59,7 @@ class TranscriptAligner:
                 ),
                 start=word.start,
                 end=word.end,
-                text=word.text,
+                text=word.word,
             )
             for word in words
         ]

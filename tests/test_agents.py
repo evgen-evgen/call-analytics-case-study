@@ -1,34 +1,93 @@
-from agents.classifier import classify
-from agents.quality import assess_quality
-from agents.compliance import check_compliance
-from agents.summarizer import summarize
+import asyncio
+
+from app.agents import (
+    AnalysisChatAgent,
+    ClassificationAgent,
+    ComplianceAgent,
+    QualityAgent,
+    SummarizerAgent,
+)
+from app.schemas import (
+    ClassificationResult,
+    ComplianceResult,
+    QualityResult,
+    SummaryResult,
+    TranscriptSegment,
+)
 
 
-def test_classifier_detects_credit_topic():
-    transcript = [{"speaker": "Оператор", "text": "Здравствуйте, хочу оформить кредит"}]
-    result = classify(transcript)
-    assert result["topic"] == "кредиты"
-    assert result["priority"] in {"low", "medium", "high"}
-
-
-def test_quality_assessment_returns_checklist():
+def test_agents_define_prompts_and_result_schemas() -> None:
     transcript = [
-        {"speaker": "Оператор", "text": "Добрый день, спасибо за обращение"},
-        {"speaker": "Клиент", "text": "Хочу уточнить по кредиту"},
+        TranscriptSegment(
+            speaker="Клиент",
+            start=0.0,
+            end=2.0,
+            text="Хочу уточнить условия кредита.",
+        )
     ]
-    result = assess_quality(transcript)
-    assert "checklist" in result
-    assert result["checklist"]["greeting"] is True
+    cases = (
+        (ClassificationAgent, ClassificationResult),
+        (QualityAgent, QualityResult),
+        (ComplianceAgent, ComplianceResult),
+        (SummarizerAgent, SummaryResult),
+    )
+
+    for agent_type, result_model in cases:
+        assert agent_type.result_model is result_model
+        assert agent_type.system_prompt
+        prompt = agent_type.build_user_prompt(
+            object.__new__(agent_type),
+            transcript,
+        )
+        assert "условия кредита" in prompt
 
 
-def test_compliance_check_reports_safe_result():
-    transcript = [{"speaker": "Оператор", "text": "Мы не обещаем доходность"}]
-    result = check_compliance(transcript)
-    assert result["passed"] is True
+class FakeTextLLMClient:
+    async def generate_text(
+        self,
+        *,
+        system_prompt: str,
+        user_prompt: str,
+        temperature: float,
+    ) -> str:
+        assert "анализу банковских звонков" in system_prompt
+        assert "Карта была заблокирована" in user_prompt
+        assert "Что сделал оператор?" in user_prompt
+        assert temperature == 0.1
+        return "Оператор заблокировал карту."
 
 
-def test_summarizer_creates_action_items():
-    transcript = [{"speaker": "Клиент", "text": "Нужно отправить договор по email"}]
-    result = summarize(transcript)
-    assert "summary" in result
-    assert isinstance(result["action_items"], list)
+def test_chat_agent_answers_from_analysis_context() -> None:
+    agent = AnalysisChatAgent(FakeTextLLMClient())
+
+    result = asyncio.run(
+        agent.run(
+            question="Что сделал оператор?",
+            analysis_context="Карта была заблокирована.",
+        )
+    )
+
+    assert result == "Оператор заблокировал карту."
+
+
+class FakeGeneralTextLLMClient:
+    async def generate_text(
+        self,
+        *,
+        system_prompt: str,
+        user_prompt: str,
+        temperature: float,
+    ) -> str:
+        assert "анализ звонка ещё не выполнен" in user_prompt.lower()
+        assert "что ты умеешь?" in user_prompt.lower()
+        return "Загрузите аудио, и я проанализирую звонок."
+
+
+def test_chat_agent_answers_without_previous_analysis() -> None:
+    agent = AnalysisChatAgent(FakeGeneralTextLLMClient())
+
+    result = asyncio.run(
+        agent.run(question="Что ты умеешь?")
+    )
+
+    assert "Загрузите аудио" in result

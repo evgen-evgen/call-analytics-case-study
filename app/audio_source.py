@@ -36,15 +36,19 @@ SUPPORTED_EXTENSIONS = {
 class AudioSourceError(ValueError):
     pass
 
-
-def extract_audio_source(user_message: str) -> AudioSource:
+def find_audio_source(
+    user_message: str,
+) -> AudioSource | None:
     match = FILE_TAG_PATTERN.search(user_message)
 
     if match is None:
-        raise AudioSourceError(
-            "В сообщении не найден прикреплённый аудиофайл."
-        )
+        return None
 
+    return _build_audio_source(match)
+
+def _build_audio_source(
+    match: re.Match[str],
+) -> AudioSource:
     attributes = dict(
         ATTRIBUTE_PATTERN.findall(
             match.group("attributes")
@@ -82,6 +86,53 @@ def extract_audio_source(user_message: str) -> AudioSource:
         filename=filename,
         content_type=content_type,
     )
+
+
+# def extract_audio_source(user_message: str) -> AudioSource:
+#     match = FILE_TAG_PATTERN.search(user_message)
+
+#     if match is None:
+#         raise AudioSourceError(
+#             "В сообщении не найден прикреплённый аудиофайл."
+#         )
+
+#     attributes = dict(
+#         ATTRIBUTE_PATTERN.findall(
+#             match.group("attributes")
+#         )
+#     )
+
+#     file_type = attributes.get("type")
+#     file_id = attributes.get("url")
+#     content_type = attributes.get("content_type")
+#     filename = attributes.get("name")
+
+#     if not file_id or not content_type or not filename:
+#         raise AudioSourceError(
+#             "OpenWebUI передал неполные метаданные файла."
+#         )
+
+#     if file_type != "file":
+#         raise AudioSourceError(
+#             f"Неподдерживаемый тип вложения: {file_type}"
+#         )
+
+#     extension = Path(filename).suffix.lower()
+
+#     if (
+#         content_type not in SUPPORTED_CONTENT_TYPES
+#         and extension not in SUPPORTED_EXTENSIONS
+#     ):
+#         raise AudioSourceError(
+#             "Неподдерживаемый формат. "
+#             "Поддерживаются WAV, MP3 и OGG."
+#         )
+
+#     return AudioSource(
+#         file_id=file_id,
+#         filename=filename,
+#         content_type=content_type,
+#     )
 
 
 class OpenWebUIAudioDownloader:

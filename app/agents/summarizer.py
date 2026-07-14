@@ -1,12 +1,26 @@
-from typing import Any, Dict, List
+from app.agents.base import BaseAgent
+from app.schemas import SummaryResult, TranscriptSegment
 
 
-def summarize(transcript: List[Dict[str, Any]]) -> Dict[str, Any]:
-    text = " ".join(item.get("text", "") for item in transcript)
-    summary = f"Клиент обратился с запросом по теме: {text[:80]}"
-    action_items = []
-    if "кредит" in text.lower():
-        action_items.append("Подготовить информацию по кредитному продукту")
-    if "email" in text.lower():
-        action_items.append("Отправить документы клиенту")
-    return {"summary": summary, "action_items": action_items}
+SUMMARIZER_SYSTEM_PROMPT = """
+Ты суммаризируешь звонки клиентов банка.
+
+Кратко опиши причину обращения, важные факты и итог.
+В action_items включи только явно требующиеся следующие действия.
+Не придумывай отсутствующие в транскрипте детали.
+Верни результат строго по переданной JSON Schema.
+""".strip()
+
+
+class SummarizerAgent(BaseAgent[SummaryResult]):
+    result_model = SummaryResult
+    system_prompt = SUMMARIZER_SYSTEM_PROMPT
+
+    def build_user_prompt(
+        self,
+        transcript: list[TranscriptSegment],
+    ) -> str:
+        return (
+            "Суммаризируй следующий разговор:\n\n"
+            f"{self.format_transcript(transcript)}"
+        )

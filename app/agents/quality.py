@@ -1,19 +1,26 @@
-from typing import Any, Dict, List
+from app.agents.base import BaseAgent
+from app.schemas import QualityResult, TranscriptSegment
 
 
-def assess_quality(transcript: List[Dict[str, Any]]) -> Dict[str, Any]:
-    text = " ".join(item.get("text", "") for item in transcript).lower()
-    greeting = "добрый" in text or "здравствуйте" in text
-    need_detection = "хочу" in text or "нужно" in text or "нуж" in text
-    solution_provided = "можно" in text or "помож" in text or "отправ" in text
-    farewell = "до свидания" in text or "спасибо" in text
+QUALITY_SYSTEM_PROMPT = """
+Ты оцениваешь качество работы оператора банка.
 
-    checklist = {
-        "greeting": greeting,
-        "need_detection": need_detection,
-        "solution_provided": solution_provided,
-        "farewell": farewell,
-    }
+Проверь приветствие, выявление потребности,
+предложение решения и прощание. Выставь total от 0 до 100
+и кратко перечисли проблемы. Опирайся только на транскрипт.
+Верни результат строго по переданной JSON Schema.
+""".strip()
 
-    total = sum(25 for value in checklist.values() if value)
-    return {"total": total, "checklist": checklist}
+
+class QualityAgent(BaseAgent[QualityResult]):
+    result_model = QualityResult
+    system_prompt = QUALITY_SYSTEM_PROMPT
+
+    def build_user_prompt(
+        self,
+        transcript: list[TranscriptSegment],
+    ) -> str:
+        return (
+            "Оцени качество работы оператора:\n\n"
+            f"{self.format_transcript(transcript)}"
+        )

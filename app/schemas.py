@@ -8,13 +8,13 @@ class AudioSource(BaseModel):
 
 
 
-class DiariztionSegment(BaseModel):
+class DiarizationSegment(BaseModel):
     speaker: str
     start: float = Field(ge=0)
     end: float = Field(ge=0)
 
 
-class WordTImeStamp(BaseModel):
+class WordTimestamp(BaseModel):
     word: str
     start: float = Field(ge=0)
     end: float = Field(ge=0)
@@ -25,7 +25,7 @@ class RawTranscriptSegment(BaseModel):
     start: float = Field(ge=0)
     end: float =  Field(ge=0)
     text: str
-    words: list[WordTImeStamp]
+    words: list[WordTimestamp]
 
 class TranscriptSegment(BaseModel):
     #final transcript segment with speaker
@@ -36,7 +36,9 @@ class TranscriptSegment(BaseModel):
     speaker: str
 
 
-class Topic(StrEnum):
+
+
+class CallTopic(StrEnum):
     CREDITS = "кредиты"
     CARDS = "карты"
     TRANSFERS = "переводы"
@@ -44,16 +46,58 @@ class Topic(StrEnum):
     OTHER = "другое"
 
 
-class Priority(StrEnum):
+class CallPriority(StrEnum):
     LOW = "low"
     MEDIUM = "medium"
     HIGH = "high"
 
+
 class ClassificationResult(BaseModel):
-    topic: Topic
-    priority: Priority
+    topic: CallTopic
+    priority: CallPriority
+
     reasoning: str = Field(
         min_length=1,
-        description="Краткое обоснование классификации.",
+        max_length=300,
+        description=(
+            "Краткое объяснение классификации "
+            "на основании транскрипта."
+        ),
     )
 
+class QualityChecklist(BaseModel):
+    greeting: bool
+    need_detection: bool
+    solution_provided: bool
+    farewell: bool
+
+
+class QualityResult(BaseModel):
+    total: int = Field(ge=0, le=100)
+    checklist: QualityChecklist
+    issues: list[str] = Field(default_factory=list)
+
+
+class ComplianceIssue(BaseModel):
+    category: str
+    description: str
+    quote: str | None = None
+    start: float | None = None
+    end: float | None = None
+
+
+class ComplianceResult(BaseModel):
+    passed: bool
+    issues: list[ComplianceIssue]
+
+
+class SummaryResult(BaseModel):
+    summary: str
+    action_items: list[str]
+
+
+class CallAnalysisResult(BaseModel):
+    classification: ClassificationResult
+    quality: QualityResult
+    compliance: ComplianceResult
+    summary: SummaryResult

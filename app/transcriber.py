@@ -2,7 +2,7 @@ from pathlib import Path
 
 from faster_whisper import WhisperModel
 
-from app.schemas import (RawTranscriptSegment, WordTImeStamp)
+from app.schemas import RawTranscriptSegment, WordTimestamp
 
 
 class TranscriptionError(RuntimeError):
@@ -61,7 +61,7 @@ class Transcriber:
             # Inference actually starts during iteration.
             for segment in segments:
                 segment_text = segment.text.strip()
-                words: list[WordTImeStamp] = []
+                words: list[WordTimestamp] = []
 
                 for word in segment.words or []:
                     word_text = word.word.strip()
@@ -73,10 +73,10 @@ class Transcriber:
                         continue
 
                     words.append(
-                        WordTImeStamp(
+                        WordTimestamp(
                             start=round(float(word.start), 3),
                             end=round(float(word.end), 3),
-                            text=word_text,
+                            word=word_text,
                         )
                     )
 

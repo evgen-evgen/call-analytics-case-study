@@ -1,4 +1,5 @@
 import asyncio
+import json
 
 from app.agents import (
     AnalysisChatAgent,
@@ -91,3 +92,126 @@ def test_chat_agent_answers_without_previous_analysis() -> None:
     )
 
     assert "Загрузите аудио" in result
+
+
+class CapturingTextLLMClient:
+    def __init__(self) -> None:
+        self.user_prompt = ""
+
+    async def generate_text(
+        self,
+        *,
+        system_prompt: str,
+        user_prompt: str,
+        temperature: float,
+    ) -> str:
+        self.user_prompt = user_prompt
+        return "Ответ"
+
+
+def test_chat_agent_limits_long_analysis_context() -> None:
+    client = CapturingTextLLMClient()
+    agent = AnalysisChatAgent(
+        client,
+        max_context_chars=1000,
+    )
+    context = "НАЧАЛО" + ("x" * 2000) + "КОНЕЦ"
+
+    result = asyncio.run(
+        agent.run(
+            question="Что произошло?",
+            analysis_context=context,
+        )
+    )
+
+    assert result == "Ответ"
+    assert "НАЧАЛО" in client.user_prompt
+    assert "КОНЕЦ" in client.user_prompt
+    assert "часть длинного анализа пропущена" in client.user_prompt
+    assert len(client.user_prompt) < 1400
+
+
+def test_chat_agent_keeps_analysis_and_relevant_file_segments() -> None:
+    client = CapturingTextLLMClient()
+    agent = AnalysisChatAgent(client, max_context_chars=1400)
+    transcript = [
+        {
+            "speaker": "Клиент",
+            "start": float(index),
+            "end": float(index + 1),
+            "text": (
+                "Кодовое слово альбатрос и спорная операция."
+                if index == 50
+                else f"Обычная реплика номер {index}."
+            ),
+        }
+        for index in range(100)
+    ]
+    analysis = {
+        "transcript": transcript,
+        "classification": {
+            "topic": "карты",
+            "priority": "high",
+            "reasoning": "Неизвестная операция.",
+        },
+        "quality": {"total": 80},
+        "compliance": {"passed": True, "issues": []},
+        "summary": {
+            "summary": "Клиент оспаривает операцию.",
+            "action_items": ["Проверить операцию."],
+        },
+    }
+    context = (
+        "## Анализ звонка\n\n```json\n"
+        + json.dumps(analysis, ensure_ascii=False)
+        + "\n```"
+    )
+
+    asyncio.run(
+        agent.run(
+            question="Что сказано про альбатрос?",
+            analysis_context=context,
+        )
+    )
+
+    assert "Клиент оспаривает операцию" in client.user_prompt
+    assert "альбатрос" in client.user_prompt
+    assert '"start": 49.0' in client.user_prompt
+    assert '"start": 51.0' in client.user_prompt
+    assert "Обычная реплика номер 20" not in client.user_prompt
+
+
+def test_chat_agent_reads_new_transcript_json_format() -> None:
+    client = CapturingTextLLMClient()
+    agent = AnalysisChatAgent(client, max_context_chars=1000)
+    transcript = [
+        {
+            "speaker": "Оператор",
+            "start": float(index),
+            "end": float(index + 1),
+            "text": (
+                "Карта была заблокирована."
+                if index == 40
+                else f"Реплика {index}."
+            ),
+        }
+        for index in range(80)
+    ]
+    context = (
+        "## Транскрипция\n\n```json\n"
+        + json.dumps(transcript, ensure_ascii=False)
+        + "\n```\n\n"
+        "## Резюме\n\nКлиент сообщил о проблеме с картой."
+    )
+
+    asyncio.run(
+        agent.run(
+            question="Когда карта была заблокирована?",
+            analysis_context=context,
+        )
+    )
+
+    assert "Клиент сообщил о проблеме" in client.user_prompt
+    assert "Карта была заблокирована" in client.user_prompt
+    assert '"start": 39.0' in client.user_prompt
+    assert '"start": 41.0' in client.user_prompt

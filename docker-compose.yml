@@ -7,10 +7,14 @@ services:
     restart: unless-stopped
     environment:
       ENABLE_API_KEYS: "true"
-      # RAG_EMBEDDING_ENGINE: openai
-      # RAG_EMBEDDING_MODEL: text-embedding-3-small
-      # BYPASS_EMBEDDING_AND_RETRIEVAL: "true"
-      # ENABLE_PERSISTENT_CONFIG: "false"
+      BYPASS_EMBEDDING_AND_RETRIEVAL: "true"
+      ENABLE_PERSISTENT_CONFIG: "false"
+      DEFAULT_MODELS: mtbank_progress
+      DEFAULT_PINNED_MODELS: mtbank_progress
+      OPENAI_API_BASE_URL: http://pipelines:9099/v1
+      OPENAI_API_KEY: ${PIPELINES_API_KEY}
+      WEBUI_SECRET_KEY: ${PIPELINES_API_KEY}
+      ENABLE_EVALUATION_ARENA_MODELS: "false"
     ports:
       - "3001:8080"
     volumes:
@@ -43,6 +47,7 @@ services:
       HF_TOKEN: ${HF_TOKEN}
       DIARIZATION_MODEL: ${DIARIZATION_MODEL}
       DIARIZATION_DEVICE: ${DIARIZATION_DEVICE}
+      MAX_CONCURRENT_AUDIO_JOBS: ${MAX_CONCURRENT_AUDIO_JOBS:-1}
 
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
       RUNTIME_LOG_LEVEL: ${RUNTIME_LOG_LEVEL:-WARNING}
@@ -51,6 +56,7 @@ services:
       LLM_BASE_URL: ${LLM_BASE_URL}
       LLM_MODEL: ${LLM_MODEL}
       LLM_TIMEOUT_SECONDS: ${LLM_TIMEOUT_SECONDS:-30}
+      CHAT_CONTEXT_MAX_CHARS: ${CHAT_CONTEXT_MAX_CHARS:-40000}
 
     ports:
       - "9099:9099"

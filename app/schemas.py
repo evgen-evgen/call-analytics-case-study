@@ -58,10 +58,9 @@ class ClassificationResult(BaseModel):
 
     reasoning: str = Field(
         min_length=1,
-        max_length=300,
         description=(
             "Краткое объяснение классификации "
-            "на основании транскрипта."
+            "на основании транскрипта, желательно до 300 символов."
         ),
     )
 

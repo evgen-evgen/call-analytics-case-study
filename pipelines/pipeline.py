@@ -7,10 +7,10 @@ license: MIT
 description: MTBank ASR pipeline for processing OpenWebUI audio attachments.
 """
 import os
-import json
 import logging
 import asyncio
 import queue
+import threading
 from time import perf_counter
 from uuid import uuid4
 from pathlib import Path
@@ -57,7 +57,7 @@ from app.observability import (
 from app.role_mapper import SpeakerRoleMapper
 from app.agents.supervisor import AnalysisResult, AnalysisSupervisor
 from app.schemas import TranscriptSegment
-from app.llm.client import LLMClient
+from app.llm.client import LLMClient, LLMRequestError
 from app.agents.analysis_chat import AnalysisChatAgent
 from app.response_presenter import ResponsePresenter
 
@@ -103,8 +103,17 @@ class Pipeline:
             default="cpu",
         )
 
+        MAX_CONCURRENT_AUDIO_JOBS: int = Field(
+            default=1,
+            ge=1,
+            description=(
+                "Maximum number of audio pipelines processed concurrently."
+            ),
+        )
+
     def __init__(self) -> None:
         configure_logging()
+        self.id = "mtbank-asr"
         self.name = "MTBank ASR"
         self.valves = self.Valves(
             WHISPER_MODEL=os.getenv("WHISPER_MODEL", "medium"),
@@ -115,6 +124,9 @@ class Pipeline:
             DEBUG_OUTPUT_MAX_LENGTH=int(os.getenv("DEBUG_OUTPUT_MAX_LENGTH", "20000")),
             DIARIZATION_MODEL=os.getenv("DIARIZATION_MODEL", "pyannote/speaker-diarization-community-1"),
             DIARIZATION_DEVICE=os.getenv("DIARIZATION_DEVICE", "cpu"),
+            MAX_CONCURRENT_AUDIO_JOBS=int(
+                os.getenv("MAX_CONCURRENT_AUDIO_JOBS", "1")
+            ),
         )
         self.downloader: OpenWebUIAudioDownloader | None = None
         self.transcriber: Transcriber | None = None
@@ -130,9 +142,13 @@ class Pipeline:
         self.chat_agent: AnalysisChatAgent | None = None
         self.presenter = ResponsePresenter()
         self._event_loop: asyncio.AbstractEventLoop | None = None
+        self._audio_semaphore: asyncio.Semaphore | None = None
 
     async def on_startup(self) -> None:
         self._event_loop = asyncio.get_running_loop()
+        self._audio_semaphore = asyncio.Semaphore(
+            self.valves.MAX_CONCURRENT_AUDIO_JOBS
+        )
         self.llm_client = LLMClient()
         self.supervisor = AnalysisSupervisor(self.llm_client)
         self.chat_agent = AnalysisChatAgent(self.llm_client)
@@ -160,6 +176,9 @@ class Pipeline:
             whisper_device=self.valves.WHISPER_DEVICE,
             diarization_model=self.valves.DIARIZATION_MODEL,
             diarization_device=self.valves.DIARIZATION_DEVICE,
+            max_concurrent_audio_jobs=(
+                self.valves.MAX_CONCURRENT_AUDIO_JOBS
+            ),
         )
 
         with operation(
@@ -185,6 +204,7 @@ class Pipeline:
             self.diarizer.unload()
         if self.llm_client is not None:
             await self.llm_client.client.close()
+        self._audio_semaphore = None
         self._event_loop = None
 
         log_event("pipeline.stopped")
@@ -228,6 +248,31 @@ class Pipeline:
         if self.diarizer is None:
             return "Ошибка diarizer не инициализирован."
 
+        try:
+            audio_source = find_audio_source(user_message)
+        except AudioSourceError as exc:
+            return self._format_error(exc)
+
+        if audio_source is not None and not body.get("stream"):
+            log_event(
+                "request.audio_skipped",
+                reason="non_stream_request",
+                filename=audio_source.filename,
+            )
+            return (
+                "Аудиофайл будет обработан "
+                "в основном streaming-запросе."
+            )
+
+        internal_task = self._internal_task(body)
+        if internal_task is not None:
+            return self._run_async(
+                self._answer_internal_task(
+                    user_message=user_message,
+                    task=internal_task,
+                )
+            )
+
         if body.get("stream"):
             return self._stream_async(
                 user_message=user_message,
@@ -252,6 +297,7 @@ class Pipeline:
         messages: list[dict[str, Any]],
         body: dict[str, Any],
         progress: Callable[[str], None] | None = None,
+        cancel_event: threading.Event | None = None,
     ) -> str:
 
         request_token = bind_request_id(str(uuid4()))
@@ -269,9 +315,10 @@ class Pipeline:
                 source = find_audio_source(user_message)
 
             if source is not None:
-                result = await self._process_audio(
+                result = await self._process_audio_with_limit(
                     source,
                     progress=progress,
+                    cancel_event=cancel_event,
                 )
             else:
                 previous_analysis = self._extract_latest_analysis(
@@ -293,6 +340,11 @@ class Pipeline:
             outcome = "completed"
             return result
 
+        except asyncio.CancelledError:
+            outcome = "cancelled"
+            log_event("request.cancelled")
+            raise
+
         except Exception as exc:
             return self._format_error(exc)
 
@@ -306,6 +358,39 @@ class Pipeline:
                 ),
             )
             reset_request_id(request_token)
+
+    async def _process_audio_with_limit(
+        self,
+        source: AudioSource,
+        *,
+        progress: Callable[[str], None] | None = None,
+        cancel_event: threading.Event | None = None,
+    ) -> str:
+        if self._audio_semaphore is None:
+            self._audio_semaphore = asyncio.Semaphore(
+                self.valves.MAX_CONCURRENT_AUDIO_JOBS
+            )
+
+        semaphore = self._audio_semaphore
+
+        if semaphore.locked():
+            self._report_progress(progress, "audio_queued")
+            log_event("audio.queue.waiting")
+
+        with operation("audio.queue.wait"):
+            await semaphore.acquire()
+
+        log_event("audio.queue.acquired")
+        try:
+            self._raise_if_cancelled(cancel_event)
+            return await self._process_audio(
+                source,
+                progress=progress,
+                cancel_event=cancel_event,
+            )
+        finally:
+            semaphore.release()
+            log_event("audio.queue.released")
 
     @staticmethod
     def _format_error(exc: Exception) -> str:
@@ -353,6 +438,25 @@ class Pipeline:
                 f"{exc}"
             )
 
+        if isinstance(exc, LLMRequestError):
+            log_event(
+                "request.llm_error",
+                level=logging.ERROR,
+                error_message=str(exc),
+            )
+            if "reduce the length" in str(exc).lower():
+                return (
+                    "## Слишком длинный контекст\n\n"
+                    "История разговора превысила лимит модели. "
+                    "Попробуйте задать более короткий вопрос или "
+                    "начать новый чат."
+                )
+            return (
+                "## Ошибка модели\n\n"
+                "Модель не смогла обработать запрос. "
+                "Попробуйте повторить его ещё раз."
+            )
+
         log_event(
             "request.unexpected_error",
             level=logging.ERROR,
@@ -371,11 +475,13 @@ class Pipeline:
         source: AudioSource,
         *,
         progress: Callable[[str], None] | None = None,
+        cancel_event: threading.Event | None = None,
     ) -> str:
         downloaded_path: Path | None = None
         normalized_path: Path | None = None
 
         try:
+            self._raise_if_cancelled(cancel_event)
             self._report_progress(progress, "file_received")
 
             with operation(
@@ -394,6 +500,7 @@ class Pipeline:
                 )
 
             self._report_progress(progress, "audio_prepared")
+            self._raise_if_cancelled(cancel_event)
 
             with operation(
                 "audio.transcribe",
@@ -402,12 +509,14 @@ class Pipeline:
                 raw_transcript = await asyncio.to_thread(
                     self.transcriber.run,
                     normalized_path,
+                    cancel_event,
                 )
 
             self._report_progress(
                 progress,
                 "transcription_completed",
             )
+            self._raise_if_cancelled(cancel_event)
 
             log_event(
                 "transcript.created",
@@ -431,6 +540,7 @@ class Pipeline:
                 progress,
                 "diarization_completed",
             )
+            self._raise_if_cancelled(cancel_event)
 
             log_event(
                 "diarization.created",
@@ -455,6 +565,7 @@ class Pipeline:
                 )
 
             self._report_progress(progress, "analysis_started")
+            self._raise_if_cancelled(cancel_event)
             analysis = await self._run_analysis(
                 final_transcript
             )
@@ -473,18 +584,9 @@ class Pipeline:
             #     "summary": analysis.summary.summary,
             #     "action_items": analysis.summary.action_items,
             # }
-            formatted_json = json.dumps(
-                analysis.model_dump(),
-                ensure_ascii=False,
-                indent=2,
-            )
-
-            return (
-                f"{ANALYSIS_MARKER}\n"
-                "## Анализ звонка\n\n"
-                "```json\n"
-                f"{formatted_json}\n"
-                "```"
+            return self.presenter.format_analysis(
+                analysis,
+                ANALYSIS_MARKER,
             )
 
         finally:
@@ -584,6 +686,37 @@ class Pipeline:
             analysis_context=analysis,
         )
 
+    async def _answer_internal_task(
+        self,
+        *,
+        user_message: str,
+        task: str,
+    ) -> str:
+        if self.llm_client is None:
+            raise RuntimeError("LLM client is not initialized.")
+
+        log_event(
+            "request.internal_task",
+            task=task,
+        )
+        return await self.llm_client.generate_text(
+            system_prompt=(
+                "Выполни внутреннюю служебную задачу "
+                "OpenWebUI строго по инструкции пользователя."
+            ),
+            user_prompt=user_message,
+            temperature=0.0,
+        )
+
+    @staticmethod
+    def _internal_task(body: dict[str, Any]) -> str | None:
+        metadata = body.get("metadata")
+        if not isinstance(metadata, dict):
+            return None
+
+        task = metadata.get("task")
+        return str(task) if task else None
+
     def _run_async(self, coroutine: Any) -> Any:
         if self._event_loop is None:
             coroutine.close()
@@ -609,6 +742,7 @@ class Pipeline:
             return
 
         progress_queue: queue.Queue[str] = queue.Queue()
+        cancel_event = threading.Event()
         future = asyncio.run_coroutine_threadsafe(
             self._pipe_async(
                 user_message=user_message,
@@ -616,17 +750,27 @@ class Pipeline:
                 messages=messages,
                 body=body,
                 progress=progress_queue.put,
+                cancel_event=cancel_event,
             ),
             self._event_loop,
         )
 
-        while not future.done() or not progress_queue.empty():
-            try:
-                yield progress_queue.get(timeout=0.25)
-            except queue.Empty:
-                continue
+        try:
+            while not future.done() or not progress_queue.empty():
+                try:
+                    yield progress_queue.get(timeout=0.25)
+                except queue.Empty:
+                    # Give StreamingResponse a regular opportunity to observe
+                    # a disconnected client. Without this heartbeat, one
+                    # next() call blocks until transcription produces output,
+                    # so Open WebUI's Stop cannot close this generator.
+                    yield ""
 
-        yield future.result()
+            yield future.result()
+        finally:
+            cancel_event.set()
+            if not future.done():
+                future.cancel()
 
     def _report_progress(
         self,
@@ -635,3 +779,10 @@ class Pipeline:
     ) -> None:
         if callback is not None:
             callback(self.presenter.format_progress(event))
+
+    @staticmethod
+    def _raise_if_cancelled(
+        cancel_event: threading.Event | None,
+    ) -> None:
+        if cancel_event is not None and cancel_event.is_set():
+            raise asyncio.CancelledError

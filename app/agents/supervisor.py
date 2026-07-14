@@ -38,17 +38,26 @@ class AnalysisSupervisor:
         self,
         transcript: list[TranscriptSegment],
     ) -> AnalysisResult:
-        (
-            classification,
-            quality,
-            compliance,
-            summary,
-        ) = await asyncio.gather(
-            self.classifier.run(transcript),
-            self.quality.run(transcript),
-            self.compliance.run(transcript),
-            self.summarizer.run(transcript),
-        )
+        tasks = [
+            asyncio.create_task(self.classifier.run(transcript)),
+            asyncio.create_task(self.quality.run(transcript)),
+            asyncio.create_task(self.compliance.run(transcript)),
+            asyncio.create_task(self.summarizer.run(transcript)),
+        ]
+
+        try:
+            (
+                classification,
+                quality,
+                compliance,
+                summary,
+            ) = await asyncio.gather(*tasks)
+        except BaseException:
+            for task in tasks:
+                if not task.done():
+                    task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
+            raise
 
         return AnalysisResult(
             transcript=transcript,

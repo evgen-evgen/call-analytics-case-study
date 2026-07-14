@@ -1,4 +1,5 @@
 import json
+import asyncio
 import logging
 import os
 import sys
@@ -90,6 +91,17 @@ def operation(
 
     try:
         yield
+    except asyncio.CancelledError:
+        log_event(
+            "operation.cancelled",
+            operation=name,
+            duration_ms=round(
+                (perf_counter() - started_at) * 1000,
+                2,
+            ),
+            **fields,
+        )
+        raise
     except Exception as exc:
         log_event(
             "operation.failed",

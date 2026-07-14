@@ -2,7 +2,7 @@ import json
 import os
 from typing import TypeVar
 
-from openai import AsyncOpenAI
+from openai import AsyncOpenAI, BadRequestError
 from pydantic import BaseModel, ValidationError
 
 from app.observability import log_event, operation
@@ -96,36 +96,101 @@ class LLMClient:
         response_model: type[ResultT],
         temperature: float = 0.0,
     ) -> ResultT:
+        messages = [
+            {
+                "role": "system",
+                "content": system_prompt,
+            },
+            {
+                "role": "user",
+                "content": user_prompt,
+            },
+        ]
+
         try:
-            with operation(
-                "llm.generate",
-                model=self.model,
-                response_schema=response_model.__name__,
-            ):
-                response = await self.client.chat.completions.create(
+            try:
+                with operation(
+                    "llm.generate",
                     model=self.model,
-                    temperature=temperature,
-                    messages=[
-                        {
-                            "role": "system",
-                            "content": system_prompt,
+                    response_schema=response_model.__name__,
+                    response_format="json_schema",
+                ):
+                    response = await self.client.chat.completions.create(
+                        model=self.model,
+                        temperature=temperature,
+                        messages=messages,
+                        response_format={
+                            "type": "json_schema",
+                            "json_schema": {
+                                "name": response_model.__name__,
+                                "strict": True,
+                                "schema": build_strict_json_schema(
+                                    response_model
+                                ),
+                            },
                         },
-                        {
-                            "role": "user",
-                            "content": user_prompt,
-                        },
-                    ],
-                    response_format={
-                        "type": "json_schema",
-                        "json_schema": {
-                            "name": response_model.__name__,
-                            "strict": True,
-                            "schema": build_strict_json_schema(
-                                response_model
-                            ),
-                        },
-                    },
+                    )
+            except BadRequestError as exc:
+                if not self._is_json_validation_failure(exc):
+                    raise
+
+                log_event(
+                    "llm.structured_retry",
+                    model=self.model,
+                    response_schema=response_model.__name__,
+                    reason="provider_json_validation_failed",
+                    fallback_format="json_object",
                 )
+                fallback_messages = [
+                    {
+                        "role": "system",
+                        "content": (
+                            f"{system_prompt}\n\n"
+                            "Верни только один валидный JSON-объект без "
+                            "Markdown и пояснений. JSON должен соответствовать "
+                            "этой схеме:\n"
+                            f"{json.dumps(response_model.model_json_schema(), ensure_ascii=False)}"
+                        ),
+                    },
+                    messages[1],
+                ]
+                try:
+                    with operation(
+                        "llm.generate",
+                        model=self.model,
+                        response_schema=response_model.__name__,
+                        response_format="json_object",
+                        retry=True,
+                    ):
+                        response = await self.client.chat.completions.create(
+                            model=self.model,
+                            temperature=temperature,
+                            messages=fallback_messages,
+                            response_format={"type": "json_object"},
+                        )
+                except BadRequestError as fallback_exc:
+                    if not self._is_json_validation_failure(fallback_exc):
+                        raise
+
+                    log_event(
+                        "llm.structured_retry",
+                        model=self.model,
+                        response_schema=response_model.__name__,
+                        reason="provider_json_mode_validation_failed",
+                        fallback_format="plain_json",
+                    )
+                    with operation(
+                        "llm.generate",
+                        model=self.model,
+                        response_schema=response_model.__name__,
+                        response_format="plain_json",
+                        retry=True,
+                    ):
+                        response = await self.client.chat.completions.create(
+                            model=self.model,
+                            temperature=temperature,
+                            messages=fallback_messages,
+                        )
 
             if response.usage is not None:
                 log_event(
@@ -150,7 +215,7 @@ class LLMClient:
 
             try:
                 return response_model.model_validate_json(
-                    content
+                    self._unwrap_json_content(content)
                 )
             except (ValidationError, json.JSONDecodeError) as exc:
                 raise LLMResponseValidationError(
@@ -165,6 +230,25 @@ class LLMClient:
             raise LLMRequestError(
                 f"Structured LLM request failed: {exc}"
             ) from exc
+
+    @staticmethod
+    def _is_json_validation_failure(exc: BadRequestError) -> bool:
+        body = exc.body
+        if isinstance(body, dict):
+            error = body.get("error")
+            if isinstance(error, dict):
+                return error.get("code") == "json_validate_failed"
+
+        return "json_validate_failed" in str(exc)
+
+    @staticmethod
+    def _unwrap_json_content(content: str) -> str:
+        value = content.strip()
+        if value.startswith("```") and value.endswith("```"):
+            first_newline = value.find("\n")
+            if first_newline != -1:
+                value = value[first_newline + 1 : -3].strip()
+        return value
 
     async def generate_text(
         self,

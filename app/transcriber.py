@@ -1,4 +1,5 @@
 from pathlib import Path
+from threading import Event
 
 from faster_whisper import WhisperModel
 
@@ -6,6 +7,10 @@ from app.schemas import RawTranscriptSegment, WordTimestamp
 
 
 class TranscriptionError(RuntimeError):
+    pass
+
+
+class TranscriptionCancelled(TranscriptionError):
     pass
 
 
@@ -34,6 +39,7 @@ class Transcriber:
     def run(
         self,
         audio_path: Path,
+        cancel_event: Event | None = None,
     ) -> list[
         RawTranscriptSegment]:
         if self.model is None:
@@ -60,6 +66,14 @@ class Transcriber:
 
             # Inference actually starts during iteration.
             for segment in segments:
+                if (
+                    cancel_event is not None
+                    and cancel_event.is_set()
+                ):
+                    raise TranscriptionCancelled(
+                        "Transcription was cancelled."
+                    )
+
                 segment_text = segment.text.strip()
                 words: list[WordTimestamp] = []
 
@@ -93,6 +107,9 @@ class Transcriber:
                 )
 
             return result
+
+        except TranscriptionCancelled:
+            raise
 
         except Exception as exc:
             raise TranscriptionError(

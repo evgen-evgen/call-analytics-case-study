@@ -54,11 +54,13 @@ class ComplianceIssue(BaseModel):
     description: str = Field(
         min_length=1,
         max_length=700,
+        description="Описание нарушения только на русском языке.",
     )
 
     recommendation: str = Field(
         min_length=1,
         max_length=700,
+        description="Рекомендация оператору только на русском языке.",
     )
 
     evidence: ComplianceEvidence | None = None
@@ -77,6 +79,7 @@ class DisclaimerCheck(BaseModel):
     reason: str = Field(
         min_length=1,
         max_length=500,
+        description="Причина результата только на русском языке.",
     )
 
     evidence: ComplianceEvidence | None = None
@@ -88,6 +91,7 @@ class RecommendationCorrectness(BaseModel):
     reason: str = Field(
         min_length=1,
         max_length=700,
+        description="Обоснование результата только на русском языке.",
     )
 
     evidence: ComplianceEvidence | None = None
@@ -102,7 +106,7 @@ class ComplianceAssessment(BaseModel):
 
     issues: list[ComplianceIssue] = Field(
         default_factory=list,
-        max_length=20,
+        max_length=5,
     )
 
 

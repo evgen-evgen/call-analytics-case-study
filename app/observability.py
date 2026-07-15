@@ -1,13 +1,14 @@
 import json
 import asyncio
 import logging
-import os
 import sys
 import traceback
 from contextlib import contextmanager
 from contextvars import ContextVar, Token
 from time import perf_counter
 from typing import Any, Iterator
+
+from app.config import AppSettings, RuntimeSettings
 
 
 _request_id: ContextVar[str | None] = ContextVar(
@@ -16,15 +17,16 @@ _request_id: ContextVar[str | None] = ContextVar(
 )
 
 logger = logging.getLogger("mtbank.pipeline")
+_service_name = "mtbank-pipelines"
 
 
-def configure_logging() -> None:
-    level_name = os.getenv("LOG_LEVEL", "INFO").upper()
+def configure_logging(settings: RuntimeSettings | None = None) -> None:
+    global _service_name
+    settings = settings or AppSettings.from_env().runtime
+    _service_name = settings.service_name
+    level_name = settings.log_level.upper()
     level = getattr(logging, level_name, logging.INFO)
-    runtime_level_name = os.getenv(
-        "RUNTIME_LOG_LEVEL",
-        "WARNING",
-    ).upper()
+    runtime_level_name = settings.runtime_log_level.upper()
     runtime_level = getattr(
         logging,
         runtime_level_name,
@@ -67,13 +69,22 @@ def log_event(
 ) -> None:
     payload = {
         "event": event,
-        "service": "mtbank-pipelines",
+        "service": _service_name,
         "request_id": _request_id.get(),
         **fields,
     }
 
     if exc_info:
-        payload["stack_trace"] = traceback.format_exc()
+        # Keep call sites and line numbers without appending exception text.
+        # Provider exceptions may embed generated content or response bodies.
+        payload["stack_trace"] = [
+            {
+                "file": frame.filename,
+                "line": frame.lineno,
+                "function": frame.name,
+            }
+            for frame in traceback.extract_tb(sys.exc_info()[2])
+        ]
 
     logger.log(
         level,
@@ -113,7 +124,7 @@ def operation(
                 2,
             ),
             error_type=type(exc).__name__,
-            error_message=str(exc),
+            error_message=f"{type(exc).__name__} during {name}",
             **fields,
         )
         raise

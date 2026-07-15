@@ -51,11 +51,12 @@ class Pipe:
         payload["model"] = "mtbank-asr"
         payload["stream"] = True
 
-        await self._emit_status(
+        active_status = await self._replace_status(
             __event_emitter__,
+            None,
             "Подготавливаю запрос…",
-            done=False,
         )
+        yielded_content = False
 
         try:
             async with httpx.AsyncClient(timeout=None) as client:
@@ -78,6 +79,15 @@ class Pipe:
                             continue
 
                         data = json.loads(raw_data)
+                        if data.get("error") is not None:
+                            active_status = await self._replace_status(
+                                __event_emitter__,
+                                active_status,
+                                "Анализ завершился с ошибкой.",
+                            )
+                            yield self._error_message()
+                            yielded_content = True
+                            break
                         choices = data.get("choices", [])
                         if not choices:
                             continue
@@ -88,20 +98,57 @@ class Pipe:
 
                         progress = self.PROGRESS_MESSAGES.get(content.strip())
                         if progress is not None:
-                            await self._emit_status(
+                            active_status = await self._replace_status(
                                 __event_emitter__,
+                                active_status,
                                 progress,
-                                done=False,
                             )
                             continue
 
+                        yielded_content = True
                         yield content
+
+            if not yielded_content:
+                active_status = await self._replace_status(
+                    __event_emitter__,
+                    active_status,
+                    "Анализ завершился с ошибкой.",
+                )
+                yield self._error_message()
         finally:
-            await self._emit_status(
-                __event_emitter__,
-                "Обработка завершена.",
+            if active_status is not None:
+                await self._emit_status(
+                    __event_emitter__,
+                    active_status,
+                    done=True,
+                )
+
+    @staticmethod
+    def _error_message() -> str:
+        return (
+            "## Ошибка модели\n\n"
+            "Не удалось завершить анализ. Попробуйте повторить запрос."
+        )
+
+    @classmethod
+    async def _replace_status(
+        cls,
+        emitter: Callable | None,
+        previous: str | None,
+        current: str,
+    ) -> str:
+        if previous is not None:
+            await cls._emit_status(
+                emitter,
+                previous,
                 done=True,
             )
+        await cls._emit_status(
+            emitter,
+            current,
+            done=False,
+        )
+        return current
 
     @staticmethod
     async def _emit_status(

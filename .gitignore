@@ -30,6 +30,3 @@ dist/
 *.log
 
 .env 
-
-tests/
-test_data/

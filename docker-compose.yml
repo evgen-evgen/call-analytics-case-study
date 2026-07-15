@@ -2,19 +2,25 @@ name: mtbank-ai-hiring
 
 services:
   open-webui:
-    image: ghcr.io/open-webui/open-webui:main
+    image: ghcr.io/open-webui/open-webui:v0.10.2
     container_name: mtbank-open-webui
     restart: unless-stopped
     environment:
       ENABLE_API_KEYS: "true"
       BYPASS_EMBEDDING_AND_RETRIEVAL: "true"
+      RAG_EMBEDDING_ENGINE: openai
+      RAG_EMBEDDING_MODEL: text-embedding-3-small
       ENABLE_PERSISTENT_CONFIG: "false"
-      DEFAULT_MODELS: mtbank_asr
-      DEFAULT_PINNED_MODELS: mtbank_asr
+      DEFAULT_MODELS: mtbank_progress
+      DEFAULT_PINNED_MODELS: mtbank_progress
       OPENAI_API_BASE_URL: http://pipelines:9099/v1
       OPENAI_API_KEY: ${PIPELINES_API_KEY}
       WEBUI_SECRET_KEY: ${PIPELINES_API_KEY}
       ENABLE_EVALUATION_ARENA_MODELS: "false"
+      ENABLE_TITLE_GENERATION: "false"
+      ENABLE_SEARCH_QUERY_GENERATION: "false"
+      ENABLE_RETRIEVAL_QUERY_GENERATION: "false"
+      AUDIO_STT_SUPPORTED_CONTENT_TYPES: ""
       DEFAULT_PROMPT_SUGGESTIONS: "null"
       DEFAULT_USER_ROLE: user
       ENABLE_SIGNUP: "true" 
@@ -22,8 +28,33 @@ services:
       - "3001:8080"
     volumes:
       - open_webui_data:/app/backend/data
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - >-
+          import urllib.request;
+          urllib.request.urlopen('http://127.0.0.1:8080/health', timeout=5)
+      interval: 5s
+      timeout: 6s
+      retries: 30
     depends_on:
       - pipelines
+
+  open-webui-functions:
+    image: ghcr.io/open-webui/open-webui:v0.10.2
+    container_name: mtbank-open-webui-functions
+    restart: "no"
+    entrypoint: ["python", "/opt/mtbank/install.py"]
+    environment:
+      OPENWEBUI_FUNCTIONS_URL: http://open-webui:8080
+      OPENWEBUI_API_KEY: ${OPENWEBUI_API_KEY}
+    volumes:
+      - ./openwebui_functions:/opt/mtbank:ro
+    depends_on:
+      open-webui:
+        condition: service_healthy
 
   pipelines:
     build:
@@ -36,30 +67,9 @@ services:
     container_name: mtbank-pipelines
     restart: unless-stopped
 
+    env_file: .env
     environment:
-      PIPELINES_API_KEY: ${PIPELINES_API_KEY}
-
-      OPENWEBUI_BASE_URL: ${OPENWEBUI_BASE_URL}
-      OPENWEBUI_API_KEY: ${OPENWEBUI_API_KEY}
-
-      WHISPER_MODEL: ${WHISPER_MODEL}
-      WHISPER_DEVICE: ${WHISPER_DEVICE}
-      WHISPER_COMPUTE_TYPE: ${WHISPER_COMPUTE_TYPE}
-      WHISPER_LANGUAGE: ${WHISPER_LANGUAGE}
-
-      HF_TOKEN: ${HF_TOKEN}
-      DIARIZATION_MODEL: ${DIARIZATION_MODEL}
-      DIARIZATION_DEVICE: ${DIARIZATION_DEVICE}
-      MAX_CONCURRENT_AUDIO_JOBS: ${MAX_CONCURRENT_AUDIO_JOBS:-1}
-
-      LOG_LEVEL: ${LOG_LEVEL:-INFO}
-      RUNTIME_LOG_LEVEL: ${RUNTIME_LOG_LEVEL:-WARNING}
-
-      LLM_API_KEY: ${LLM_API_KEY}
-      LLM_BASE_URL: ${LLM_BASE_URL}
-      LLM_MODEL: ${LLM_MODEL}
-      LLM_TIMEOUT_SECONDS: ${LLM_TIMEOUT_SECONDS:-30}
-      CHAT_CONTEXT_MAX_CHARS: ${CHAT_CONTEXT_MAX_CHARS:-40000}
+      SERVICE_NAME: mtbank-pipelines
 
     ports:
       - "9099:9099"
@@ -69,6 +79,122 @@ services:
       - ./app:/app/app
       - huggingface_cache:/root/.cache/huggingface
 
+  analysis-api:
+    build:
+      context: .
+      dockerfile: Dockerfile.pipelines
+      network: host
+    container_name: mtbank-analysis-api
+    restart: unless-stopped
+    entrypoint:
+      - uvicorn
+      - app.api.main:app
+      - --host
+      - 0.0.0.0
+      - --port
+      - "8000"
+      - --proxy-headers
+      - --forwarded-allow-ips=*
+    env_file: .env
+    environment:
+      SERVICE_NAME: mtbank-analysis-api
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./app:/app/app
+      - huggingface_cache:/root/.cache/huggingface
+
+  prometheus:
+    image: prom/prometheus:v3.5.0
+    container_name: mtbank-prometheus
+    restart: unless-stopped
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./observability/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus_data:/prometheus
+    depends_on:
+      - pipelines
+
+  loki:
+    image: grafana/loki:3.7.0
+    container_name: mtbank-loki
+    restart: unless-stopped
+    command: ["-config.file=/etc/loki/local-config.yaml"]
+    ports:
+      - "127.0.0.1:3100:3100"
+    volumes:
+      - ./observability/loki/loki.yml:/etc/loki/local-config.yaml:ro
+      - loki_data:/loki
+
+  alloy:
+    image: grafana/alloy:v1.16.1
+    container_name: mtbank-alloy
+    restart: unless-stopped
+    command:
+      - run
+      - --storage.path=/var/lib/alloy/data
+      - /etc/alloy/config.alloy
+    volumes:
+      - ./observability/alloy/config.alloy:/etc/alloy/config.alloy:ro
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - alloy_data:/var/lib/alloy/data
+    depends_on:
+      - loki
+
+  grafana:
+    image: grafana/grafana:12.1.0
+    container_name: mtbank-grafana
+    restart: unless-stopped
+    environment:
+      GF_SECURITY_ADMIN_USER: ${GRAFANA_ADMIN_USER:-admin}
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:-admin}
+      GF_USERS_ALLOW_SIGN_UP: "false"
+      GF_SERVER_ROOT_URL: ${PUBLIC_BASE_URL:-http://localhost:5000}/grafana/
+      GF_SERVER_SERVE_FROM_SUB_PATH: "true"
+    ports:
+      - "3002:3000"
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./observability/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./observability/grafana/dashboards:/var/lib/grafana/dashboards:ro
+    depends_on:
+      - prometheus
+      - loki
+
+  caddy:
+    image: caddy:2.10.2-alpine
+    container_name: mtbank-caddy
+    restart: unless-stopped
+    ports:
+      - "5000:5000"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      open-webui:
+        condition: service_healthy
+      grafana:
+        condition: service_started
+      analysis-api:
+        condition: service_started
+
+networks:
+  default:
+    ipam:
+      config:
+        - subnet: 172.19.0.0/16
+
 volumes:
   open_webui_data:
   huggingface_cache:
+  prometheus_data:
+  grafana_data:
+  loki_data:
+  alloy_data:
+  caddy_data:
+  caddy_config:

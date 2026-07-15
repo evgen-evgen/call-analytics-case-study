@@ -1,4 +1,16 @@
 from app.schemas.analysis import CallAnalysisResult
+from app.schemas.analysis_job import (
+    AnalysisJobResponse,
+    AnalysisJobStatus,
+    AnalyzeAccepted,
+)
+from app.schemas.analysis_response import (
+    AnalyzeResponse,
+    PublicClassification,
+    PublicComplianceResult,
+    PublicQualityChecklist,
+    PublicQualityScore,
+)
 from app.schemas.audio import (
     AudioSource,
     DiarizationSegment,
@@ -28,11 +40,23 @@ from app.schemas.quality import (
     QualityEvidence,
     QualityResult,
 )
-from app.schemas.summary import SummaryAssessment
+from app.schemas.summary import (
+    ActionItem,
+    ActionItemOwner,
+    ActionItemStatus,
+    SummaryAssessment,
+)
 from app.schemas.transcript import TranscriptSegment
 
 __all__ = [
     "AudioSource",
+    "ActionItem",
+    "ActionItemOwner",
+    "ActionItemStatus",
+    "AnalyzeResponse",
+    "AnalyzeAccepted",
+    "AnalysisJobResponse",
+    "AnalysisJobStatus",
     "CallAnalysisResult",
     "CallPriority",
     "CallTopic",
@@ -51,6 +75,10 @@ __all__ = [
     "QualityCriterionResult",
     "QualityEvidence",
     "QualityResult",
+    "PublicClassification",
+    "PublicComplianceResult",
+    "PublicQualityChecklist",
+    "PublicQualityScore",
     "RawTranscriptSegment",
     "RecommendationCorrectness",
     "SummaryAssessment",

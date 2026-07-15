@@ -1,324 +1,304 @@
-# 🏦 MTBank — AI Engineer: Тестовое задание
+# AI-анализатор банковских звонков
 
-> **Вакансия:** AI Engineer — AI-агенты и речевая аналитика контакт-центра  
-> **Уровень:** Middle / Senior  
-> **Срок выполнения:** 3–5 рабочих дней
+Прототип речевой аналитики контакт-центра: принимает аудиозапись, распознаёт
+речь, разделяет реплики оператора и клиента и запускает четыре независимых
+LLM-агента для классификации, оценки качества, compliance-проверки и
+суммаризации.
 
----
+Живое HTTPS-демо: [jay.tailf580a.ts.net](https://jay.tailf580a.ts.net/)
 
-## 📋 Содержание
+## Возможности
 
-- [Как начать](#-как-начать)
-- [Контекст](#контекст)
-- [Что нужно построить](#что-нужно-построить)
-- [Технический стек](#технический-стек)
-- [Критерии оценки](#критерии-оценки)
-- [Как сдать работу](#как-сдать-работу)
-- [Тестовые данные](#тестовые-данные)
-- [FAQ](#faq)
+- загрузка WAV, MP3 и OGG через Open WebUI или REST API;
+- нормализация в PCM WAV 16 kHz mono через FFmpeg;
+- ASR на `faster-whisper medium` с word timestamps;
+- диаризация `pyannote/speaker-diarization-community-1`;
+- назначение ролей «Оператор» и «Клиент»;
+- четыре параллельных LLM-агента;
+- частичный результат, если один из агентов завершился с ошибкой;
+- асинхронный REST API с job ID;
+- единая точка входа Caddy;
+- метрики Prometheus, JSON-логи в Loki и готовый Grafana-дашборд.
 
----
+## Быстрый запуск
 
-## 🚀 Как начать
+Требования: Docker с Compose v2, FFmpeg внутри образа, Hugging Face token с
+доступом к модели pyannote и ключ OpenAI-совместимого LLM-провайдера.
 
-1. Нажмите зелёную кнопку **«Use this template» → «Create a new repository»** вверху этой страницы
-2. Создайте **публичный** репозиторий под своим аккаунтом (структура и тестовые аудио скопируются автоматически)
-3. Реализуйте решение в своём репозитории
-4. Задеплойте демо и отправьте ссылки — см. [Как сдать работу](#как-сдать-работу)
-
-> ⚠️ Не делайте fork — используйте именно template. Форки видны в графе исходного репозитория, а ваше решение должно быть независимым.
-
----
-
-## Контекст
-
-Контакт-центр МТБанка обрабатывает тысячи звонков ежедневно. Операторы работают со сложными банковскими продуктами, а супервайзеры вручную проверяют качество обслуживания.
-
-**Ваша задача** — создать прототип системы, которая:
-1. Автоматически транскрибирует записи звонков (ASR)
-2. Анализирует их с помощью LLM-агентов
-3. Предоставляет аналитику через веб-интерфейс на базе **OpenWebUI Pipelines**
-
----
-
-## Что нужно построить
-
-### Компонент 1 — ASR Pipeline (транскрибация)
-
-OpenWebUI Pipeline, который принимает аудиофайл (загрузка через чат или URL) и возвращает структурированный транскрипт.
-
-**Требования:**
-- Использовать `faster-whisper` или `openai-whisper` (модель `medium` или выше)
-- Поддержать форматы: WAV, MP3, OGG (минимум два)
-- Базовая диаризация: разделить транскрипт на `Оператор` / `Клиент`
-- Возвращать результат с временны́ми метками + спикер + текст
-
-**Пример вывода:**
-```json
-[
-  { "speaker": "Оператор", "start": 0.0,  "end": 4.2,  "text": "Добрый день, МТБанк, меня зовут Анна." },
-  { "speaker": "Клиент",   "start": 4.5,  "end": 8.1,  "text": "Здравствуйте, хочу узнать про кредит." }
-]
+```bash
+git clone <repository-url>
+cd call-analytics-case-study
+cp .env.example .env
 ```
 
----
+Заполните как минимум:
 
-### Компонент 2 — Multi-Agent аналитика
-
-Система из **минимум 4 агентов**, оркестрованных через OpenWebUI Pipeline:
-
-| Агент | Задача |
-|---|---|
-| 🏷️ **Классификатор** | Тематика обращения (кредиты / карты / переводы / жалобы) + приоритет |
-| ⭐ **Агент качества** | Чеклист оператора: приветствие, выявление потребности, решение, прощание |
-| 🛡️ **Compliance** | Запрещённые фразы, обязательные disclaimers, корректность предложений |
-| 📝 **Суммаризатор** | Краткое резюме (3–5 предложений) + список action items |
-
-Оркестрацию реализуйте через OpenWebUI Pipeline (LangGraph или собственный Supervisor-паттерн). **Обоснуйте выбор** в README вашего репозитория.
-
----
-
-### Компонент 3 — Веб-интерфейс и API
-
-**OpenWebUI чат:** пользователь загружает аудио → получает полный анализ в чате.
-
-**REST API:**
-```
-POST /analyze
-Content-Type: multipart/form-data
-Body: file=<audio> или { "url": "https://..." }
+```env
+HF_TOKEN=hf_...
+LLM_API_KEY=...
+LLM_BASE_URL=https://openrouter.ai/api/v1
+LLM_MODEL=openai/gpt-oss-20b
+PIPELINES_API_KEY=...
+OPENWEBUI_API_KEY=...
+PUBLIC_BASE_URL=http://localhost:5000
 ```
 
-**Структура JSON-ответа:**
+Запуск всего стека одной командой:
+
+```bash
+docker compose up -d --build
+```
+
+Первый запуск занимает больше времени из-за загрузки моделей Whisper и
+pyannote. Состояние сервисов можно проверить командой:
+
+```bash
+docker compose ps
+```
+
+## Публичные маршруты
+
+Caddy слушает порт `5000` и разводит запросы по путям:
+
+| Назначение | Локальный URL | HTTPS-демо |
+|---|---|---|
+| Open WebUI | `http://localhost:5000/` | `https://jay.tailf580a.ts.net/` |
+| Grafana | `http://localhost:5000/grafana/` | `https://jay.tailf580a.ts.net/grafana/` |
+| Swagger UI | `http://localhost:5000/docs` | `https://jay.tailf580a.ts.net/docs` |
+| OpenAPI | `http://localhost:5000/openapi.json` | `https://jay.tailf580a.ts.net/openapi.json` |
+| Создать анализ | `POST http://localhost:5000/analyze` | `POST https://jay.tailf580a.ts.net/analyze` |
+| Статус и результат | `GET http://localhost:5000/analyses/{job_id}` | `GET https://jay.tailf580a.ts.net/analyses/{job_id}` |
+
+Прямые порты сервисов оставлены для локальной диагностики: Open WebUI
+`3001`, Grafana `3002`, Analysis API `8000`, Pipelines `9099` и Prometheus
+`9090`.
+
+## REST API
+
+### Отправка файла
+
+```bash
+curl -i \
+  -X POST https://jay.tailf580a.ts.net/analyze \
+  -F 'file=@test_data/02_lost_card_8k.wav'
+```
+
+Также поддерживается URL источника:
+
+```bash
+curl -i \
+  -X POST https://jay.tailf580a.ts.net/analyze \
+  -H 'Content-Type: application/json' \
+  -d '{"url":"https://example.org/call.wav"}'
+```
+
+API валидирует и сохраняет входной файл, создаёт фоновое задание и отвечает
+`202 Accepted` с заголовком `Location`:
+
 ```json
 {
-  "transcript": [
-    { "speaker": "Оператор", "start": 0.0, "end": 4.2, "text": "..." }
-  ],
-  "classification": { "topic": "кредиты", "priority": "medium" },
-  "quality_score": {
-    "total": 78,
-    "checklist": {
-      "greeting": true,
-      "need_detection": true,
-      "solution_provided": true,
-      "farewell": false
-    }
-  },
-  "compliance": { "passed": true, "issues": [] },
-  "summary": "Клиент обратился по вопросу...",
-  "action_items": ["Отправить КП на email клиента"]
+  "job_id": "e6f8d1b2-...",
+  "status": "queued",
+  "status_url": "https://jay.tailf580a.ts.net/analyses/e6f8d1b2-..."
 }
 ```
 
----
-
-## Технический стек
-
-| Область | Требование |
-|---|---|
-| **AI-платформа** | OpenWebUI Pipelines — **обязательно** |
-| **ASR** | faster-whisper или openai-whisper |
-| **LLM** | Любая OpenAI-совместимая модель (обоснуйте выбор) |
-| **Backend** | Python 3.11+, FastAPI |
-| **Контейнеризация** | Docker Compose — `docker compose up` поднимает весь стек |
-| **Тесты** | pytest: unit-тест на каждого агента + интеграционный тест pipeline |
-| **Конфигурация** | `.env` + `.env.example` обязательны |
-| **Логирование** | JSON-логи с входом/выходом каждого агента |
-
-### Логи и обсервабилити
-
-ASR pipeline пишет структурированные JSON-события в stdout. Все события
-одного запуска связаны полем `request_id`; операции имеют стабильное имя в
-поле `operation`, а завершающие события содержат `duration_ms`.
-
-Основные события:
-
-- `request.started` / `request.finished` — полный цикл обработки;
-- `operation.started` / `operation.completed` / `operation.failed` — загрузка,
-  нормализация, ASR, диаризация, выравнивание и LLM-вызовы;
-- `transcript.created` / `diarization.created` — безопасные агрегаты без текста
-  разговора;
-- `llm.usage` — количество prompt/completion tokens, если провайдер их вернул.
-
-Уровень задаётся переменной `LOG_LEVEL` (по умолчанию `INFO`). Уровень root
-logger базового Pipelines runtime задаётся через `RUNTIME_LOG_LEVEL` (по
-умолчанию `WARNING`), чтобы runtime не печатал полный результат `pipe()`. Формат
-подходит для последующего сбора Docker-логов через Loki и визуализации в
-Grafana. Текст транскрипта, prompt/response и секреты намеренно в технические
-логи не пишутся.
-
----
-
-## Критерии оценки
-
-| Критерий | Что проверяем | Баллы |
-|---|---|---|
-| Pipeline архитектура | Структура, разделение ответственности, Tools/Actions | **25** |
-| ASR качество | Точность (WER-таблица), диаризация, обработка ошибок, качество подборки тестовых данных | **20** |
-| Multi-Agent логика | Разделение агентов, качество промптов, результаты | **25** |
-| Код и архитектура | Читаемость, тесты, .env, JSON-логирование | **15** |
-| Документация | README: схема, инструкции, обоснование решений | **10** |
-| Живое демо | HTTPS, стабильность, отклик < 60 сек на файл до 5 мин | **5** |
-| **Итого** | | **100** |
-
-**Проходной балл: 65/100**
-
-### ⚡ Бонусные задания (+15 баллов)
-
-- **(+5)** Real-time режим — WebSocket транскрибация с задержкой < 3 сек
-- **(+5)** Grafana-дашборд — метрики: количество звонков, quality_score, топ тематик
-- **(+5)** Агент трендов — анализирует несколько звонков, выявляет паттерны
-
-### 🚫 Автоматическая дисквалификация
-
-- Репозиторий приватный или недоступен
-- Живое демо недоступно (даём 2 попытки с интервалом 24 часа)
-- Отсутствует OpenWebUI Pipeline (замена на просто FastAPI — не принимается)
-- Использование чужого кода без указания источника
-- README только на английском без русской версии
-
----
-
-## Рекомендуемый план работ
-
-| День | Этап | Что нужно сделать |
-|---|---|---|
-| **1** | Инфраструктура | Развернуть OpenWebUI локально, настроить LLM-бэкенд, создать базовый Pipeline, убедиться что чат работает |
-| **2** | ASR Pipeline | Интегрировать faster-whisper, загрузка аудио, базовая диаризация, структурированный транскрипт |
-| **3** | Агенты | Реализовать 4 агента (классификатор, качество, compliance, суммаризатор), настроить оркестрацию |
-| **4** | API + тесты | FastAPI эндпоинт, unit-тесты, интеграционные тесты, .env, JSON-логирование |
-| **5** | Деплой + документация | Публичный хост, README с архитектурной схемой, прогон тестовых данных, WER-таблица, финальная проверка |
-
----
-
-## Рекомендуемая структура репозитория
-
-```
-your-repo/
-├── pipeline.py                # Основной OpenWebUI Pipeline
-├── agents/
-│   ├── classifier.py
-│   ├── quality.py
-│   ├── compliance.py
-│   └── summarizer.py
-├── asr/
-│   ├── transcriber.py         # faster-whisper обёртка
-│   └── diarizer.py
-├── api/
-│   └── main.py                # FastAPI /analyze
-├── tests/
-│   ├── test_agents.py
-│   └── test_pipeline.py
-├── test_data/                 # Ваши тестовые аудио + эталонные транскрипты
-│   ├── call_dialog.wav
-│   ├── call_dialog.txt
-│   └── ...
-├── docker-compose.yml
-├── .env.example
-└── README.md                  # Ваша документация
-```
-
----
-
-### Минимальный скелет Pipeline класса
-
-Это не обязательный шаблон, а отправная точка. Можете отклониться — обоснуйте в README.
-
-```python
-class Pipeline:
-    class Valves(BaseModel):              # конфигурация через OpenWebUI UI
-        LLM_BASE_URL: str = "http://llm:8000/v1"
-        LLM_MODEL: str = "qwen2.5:7b"
-        WHISPER_MODEL: str = "medium"
-
-    async def on_startup(self):           # инициализация при запуске
-        self.transcriber = Transcriber(self.valves.WHISPER_MODEL)
-        self.agents = self._init_agents()
-
-    async def pipe(self, body, __user__=None):
-        audio_url = self._extract_audio(body)       # из сообщения пользователя
-        transcript = await self.transcriber.run(audio_url)
-        results = await self._run_agents(transcript)
-        return self._format_response(results)       # markdown для чата
-```
-
----
-
-## Тестовые данные
-
-**Поиск и подготовка тестовых данных — часть задания.** Умение найти или создать подходящие данные — базовый навык AI-инженера.
-
-### Требования к вашим тестовым данным
-
-Подготовьте **минимум 5 аудиофайлов** русской речи и включите их в свой репозиторий (папка `test_data/`) вместе с эталонными транскриптами:
-
-- Хотя бы один файл **8kHz** (телефонное качество) или прогнанный через телефонный кодек
-- Хотя бы один **диалог двух говорящих** (для проверки диаризации) длительностью 1+ минута
-- Общая длительность — не менее 5 минут
-
-### Где взять
-
-**Вариант A — Открытые датасеты:**
-- [Kaggle: Russian Open STT (phone calls)](https://www.kaggle.com/datasets/alexcumder/audiosets) — реальные телефонные звонки
-- [Golos](https://github.com/salute-developers/golos) — 1240 часов русской речи (SberDevices)
-- [Common Voice RU](https://commonvoice.mozilla.org/ru/datasets) — Mozilla
-- [Hugging Face: bond005/sberdevices_golos_10h_crowd](https://huggingface.co/datasets/bond005/sberdevices_golos_10h_crowd) и другие русские ASR-датасеты
-
-**Вариант B — Синтез диалога (для Multi-Agent демо обязательно):**
-
-Сгенерируйте звонок оператор/клиент 2–4 минуты по сценарию из [`docs/sample-dialog.md`](docs/sample-dialog.md):
+### Получение результата
 
 ```bash
-pip install edge-tts
-edge-tts --voice ru-RU-SvetlanaNeural --text "..." --write-media operator.mp3   # оператор
-edge-tts --voice ru-RU-DmitryNeural  --text "..." --write-media client.mp3     # клиент
-# склейка с паузами — ffmpeg/pydub
+curl https://jay.tailf580a.ts.net/analyses/e6f8d1b2-...
 ```
 
-Или [Silero TTS](https://github.com/snakers4/silero-models) — натуральные русские голоса, работает офлайн.
+Статусы задания: `queued`, `processing`, `completed`, `failed`. При успешном
+завершении поле `result` содержит итог анализа; отдельного result endpoint нет.
+Задания хранятся в памяти процесса в течение
+`ANALYSIS_JOB_RETENTION_SECONDS` секунд.
 
-Телефонное качество из любой записи: `ffmpeg -i in.wav -ar 8000 -acodec pcm_mulaw tel.wav`
+Пример результата:
 
-### Что оцениваем
-
-Осмысленность выборки: разные форматы, sample rate, длительности, наличие диалога. Прогоните все свои файлы через ASR, посчитайте WER (`jiwer`) против эталонов и приложите таблицу к README.
-
----
-
-## Как сдать работу
-
-Отправьте письмо на **azubik@mtbank.by** с темой:
-
+```json
+{
+  "job_id": "e6f8d1b2-...",
+  "status": "completed",
+  "result": {
+    "transcript": [
+      {
+        "speaker": "Оператор",
+        "start": 0.0,
+        "end": 4.2,
+        "text": "Добрый день, банк, меня зовут Анна."
+      }
+    ],
+    "classification": {"topic": "кредиты", "priority": "low"},
+    "quality_score": {
+      "total": 75,
+      "checklist": {
+        "greeting": true,
+        "need_detection": true,
+        "solution_provided": true,
+        "farewell": false
+      }
+    },
+    "compliance": {"passed": true, "issues": []},
+    "summary": "Клиент обратился для уточнения условий кредитования.",
+    "action_items": [],
+    "agent_errors": {}
+  },
+  "error": null
+}
 ```
-ТЗ AI Engineer — [Ваше Имя Фамилия]
+
+Если отдельный LLM-агент получает timeout или невалидный ответ, остальные
+агенты не отменяются. Их результаты возвращаются, недоступная секция равна
+`null`, а `agent_errors` содержит имя и тип ошибки упавшего агента.
+
+## Архитектура
+
+```mermaid
+flowchart TD
+    User[Пользователь] --> Caddy[Caddy :5000]
+    Caddy -->|/| WebUI[Open WebUI]
+    Caddy -->|/analyze, /analyses, /docs| API[FastAPI]
+    Caddy -->|/grafana| Grafana[Grafana]
+
+    WebUI --> Pipeline[Open WebUI Pipeline]
+    Pipeline --> Service[AudioAnalysisService]
+    API --> Service
+
+    Service --> Normalize[FFmpeg: PCM 16 kHz mono]
+    Normalize --> Whisper[faster-whisper]
+    Normalize --> Diarizer[pyannote.audio]
+    Whisper --> Align[Word-speaker alignment]
+    Diarizer --> Align
+    Align --> Roles[Role mapper]
+    Roles --> Supervisor[AnalysisSupervisor]
+
+    Supervisor --> Classification[ClassificationAgent]
+    Supervisor --> Quality[QualityAgent]
+    Supervisor --> Compliance[ComplianceAgent]
+    Supervisor --> Summary[SummarizerAgent]
+    Classification --> Result[CallAnalysisResult]
+    Quality --> Result
+    Compliance --> Result
+    Summary --> Result
+
+    Service --> Metrics[Prometheus metrics]
+    Service --> Logs[JSON logs]
+    Metrics --> Prometheus[Prometheus]
+    Logs --> Alloy[Grafana Alloy]
+    Alloy --> Loki[Loki]
+    Prometheus --> Grafana
+    Loki --> Grafana
 ```
 
-В письме обязательно укажите:
-1. 🔗 Ссылка на GitHub-репозиторий (публичный)
-2. 🌐 Ссылка на живое демо (HTTPS)
-3. 💬 Краткое описание архитектурных решений (3–5 предложений)
-4. ⏱️ Затраченное время (честно — помогает нам калибровать задание)
+Open WebUI и FastAPI являются двумя входами в один `AudioAnalysisService`,
+поэтому нормализация, ASR, диаризация и агентный анализ не дублируются.
 
-**Срок:** 5 рабочих дней с момента получения ТЗ.  
-**Обратная связь:** в течение 3 рабочих дней после сдачи.  
-**Вопросы:** azubik@mtbank.by
+### Ключевые решения
 
----
+**Нормализация аудио.** Любой поддерживаемый контейнер заранее преобразуется в
+PCM WAV. Это устраняет различия start time, padding и seek между WAV, MP3 и
+OGG и стабилизирует ASR/диаризацию.
 
-## FAQ
+**ASR.** `faster-whisper medium` выбран за CTranslate2, CPU INT8, word
+timestamps и меньшее потребление памяти по сравнению с оригинальным Whisper.
 
-**Q: Какую LLM использовать?**  
-A: Любую OpenAI-совместимую. Если нет GPU — Groq/Together/OpenRouter дают бесплатный tier. Обоснуйте выбор в README.
+**Диаризация.** Pyannote определяет интервалы двух спикеров, после чего слова
+Whisper назначаются интервалу с максимальным временным пересечением. В
+прототипе первый спикер считается оператором; для production нужны отдельные
+телефонные каналы, telephony metadata или role classifier.
 
-**Q: Обязателен ли именно OpenWebUI?**  
-A: Да, это ключевое требование вакансии — мы используем OpenWebUI как основную платформу.
+**Оркестрация.** Используется собственный Supervisor: workflow фиксированный,
+агенты независимы, условных переходов и циклов нет. Все четыре агента запускаются
+конкурентно через `asyncio.gather(..., return_exceptions=True)`. LangGraph стал
+бы полезен при human-in-the-loop, динамической маршрутизации или циклах ревью.
 
-**Q: Можно ли использовать LangGraph поверх Pipelines?**  
-A: Да, LangGraph для оркестрации агентов — хорошее решение. Покажите как он интегрируется с Pipeline.
+**LLM.** По умолчанию используется `openai/gpt-oss-20b` через OpenRouter как
+компромисс между скоростью, стоимостью и достаточной сложностью для русского
+банковского диалога. Клиент пробует structured output в цепочке
+`json_schema -> json_object -> plain JSON`, после чего всегда выполняет
+локальную Pydantic-валидацию. Concurrency, timeout, retry и максимальное число
+completion tokens задаются через `.env`.
 
-**Q: Куда деплоить демо?**  
-A: Любая публичная платформа: Hetzner, DigitalOcean, Render, Railway, Hugging Face Spaces. Главное — HTTPS и без VPN.
+## Обсервабилити
 
-**Q: Нужна ли реальная речь, или можно TTS?**  
-A: TTS достаточно для демо. Главное — показать что система работает на русском языке.
+Стек наблюдаемости поднимается тем же `docker compose up`:
+
+- приложение пишет однострочные JSON-события в stdout;
+- Grafana Alloy читает Docker logs и отправляет их в Loki;
+- Prometheus собирает прикладные метрики;
+- Grafana автоматически получает datasources и dashboard из
+  `observability/grafana/`.
+
+Все события одного запроса связаны `request_id`. Для длительных операций
+используется единый контекст `operation(...)`, который пишет:
+
+- `operation.started`, `operation.completed`, `operation.failed`;
+- `duration_ms`, `operation`, `service`, `request_id`;
+- безопасный stack trace без prompt, ответа модели и текста разговора;
+- `llm.usage` с prompt/completion/total tokens и finish reason;
+- `agent.failed` для частично завершившегося анализа;
+- `transcript.created` и `diarization.created` только с агрегатами.
+
+В Prometheus экспортируются:
+
+- `call_analytics_calls_total{topic=...}`;
+- `call_analytics_quality_score` histogram.
+
+Готовый Grafana dashboard показывает количество обработанных звонков, темы,
+распределение quality score, application logs и ошибки операций; события в
+логах содержат длительности этапов. Текст
+транскрипта, prompt/response и секреты в технические логи намеренно не пишутся.
+Уровни регулируются `LOG_LEVEL` и `RUNTIME_LOG_LEVEL`.
+
+## Тесты
+
+```bash
+uv sync
+uv run pytest -q
+```
+
+Интеграционные тесты с реальным LLM вынесены под marker `integration` и по
+умолчанию не запускаются:
+
+```bash
+uv run pytest -m integration
+```
+
+## Тестовые данные и WER
+
+В `test_data/` находятся пять банковских диалогов разных форматов и частот,
+включая телефонную запись 8 kHz. Эталонные тексты, гипотезы и отчёты лежат в
+`test_case/`.
+
+Повторный расчёт:
+
+```bash
+uv run python -m scripts.evaluate_wer
+```
+
+| Запись | Слов | S | D | I | WER | CER |
+|---|---:|---:|---:|---:|---:|---:|
+| `01_credit_16k.wav` | 166 | 8 | 2 | 0 | 6.02% | 5.72% |
+| `02_lost_card_8k.wav` | 154 | 3 | 0 | 0 | 1.95% | 0.47% |
+| `03_transfer_24k.mp3` | 155 | 4 | 4 | 0 | 5.16% | 4.86% |
+| `04_complaint_48k.ogg` | 148 | 8 | 3 | 0 | 7.43% | 8.43% |
+| `05_fraud_22k.wav` | 193 | 3 | 2 | 0 | 2.59% | 1.78% |
+
+Полные машинно-читаемые результаты: `test_case/reports/wer.csv` и
+`test_case/reports/wer.md`.
+
+## Ограничения и production roadmap
+
+- задания REST API сейчас хранятся в памяти одного процесса;
+- обработка CPU-bound и ограничивается semaphore;
+- эвристика ролей не покрывает IVR и записи, начавшиеся с клиента;
+- для production нужны PostgreSQL, object storage, очередь и GPU workers;
+- нужны PII redaction, OAuth2/JWT, tenant isolation, audit log и retention;
+- URL-загрузчику требуется более строгая SSRF-защита;
+- real-time режим потребует chunked/WebSocket ASR и online diarization;
+- Trends Agent должен агрегировать несколько звонков через Python/SQL, оставляя
+  LLM кластеризацию и формулирование рекомендаций.
+
+В бонусах можно отметить реализованный
+Grafana-дашборд. 

@@ -21,6 +21,7 @@ class BaseAgent(
 ):
     result_model: type[AgentResultT]
     system_prompt: str
+    response_format_mode = "json_schema"
 
     def __init__(
         self,
@@ -32,13 +33,17 @@ class BaseAgent(
         self,
         transcript: list[TranscriptSegment],
     ) -> AgentResultT:
+        parameters = {
+            "system_prompt": self.system_prompt,
+            "user_prompt": self.build_user_prompt(transcript),
+            "response_model": self.result_model,
+            "temperature": 0.0,
+        }
+        if self.response_format_mode != "json_schema":
+            parameters["response_format_mode"] = self.response_format_mode
+
         return await self.llm_client.generate_structured(
-            system_prompt=self.system_prompt,
-            user_prompt=self.build_user_prompt(
-                transcript
-            ),
-            response_model=self.result_model,
-            temperature=0.0,
+            **parameters,
         )
 
     @abstractmethod

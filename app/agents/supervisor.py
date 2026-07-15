@@ -1,6 +1,6 @@
 import asyncio
-
-from pydantic import BaseModel
+import logging
+from typing import Any
 
 from app.agents.classifier import ClassificationAgent
 from app.agents.compliance import ComplianceAgent
@@ -8,27 +8,23 @@ from app.agents.quality import QualityAgent
 from app.agents.summarizer import SummarizerAgent
 from app.llm.client import LLMClient
 from app.schemas import (
-    ClassificationResult,
-    ComplianceResult,
-    QualityResult,
-    SummaryAssessment,
+    CallAnalysisResult,
     TranscriptSegment,
 )
-
-
-from app.services import (
-    calculate_quality_result,
-    validate_quality_evidence,
+from app.services.compliance_service import (
     build_compliance_result,
     validate_compliance_evidence,
-    normalize_summary_result,
 )
-class AnalysisResult(BaseModel):
-    transcript: list[TranscriptSegment]
-    classification: ClassificationResult
-    quality: QualityResult
-    compliance: ComplianceResult
-    summary: SummaryAssessment
+from app.services.quality_service import (
+    calculate_quality_result,
+    validate_quality_evidence,
+)
+from app.services.summary_service import normalize_summary_result
+from app.observability import log_event
+
+
+AnalysisResult = CallAnalysisResult
+
 
 class AnalysisSupervisor:
     def __init__(
@@ -43,7 +39,7 @@ class AnalysisSupervisor:
     async def run(
         self,
         transcript: list[TranscriptSegment],
-    ) -> AnalysisResult:
+    ) -> CallAnalysisResult:
         tasks = [
             asyncio.create_task(
                 self.classifier.run(transcript),
@@ -63,47 +59,56 @@ class AnalysisSupervisor:
             ),
         ]
 
-        try:
-            (
-                classification,
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+        names = ("classification", "quality", "compliance", "summary")
+        values: dict[str, Any | None] = {}
+        agent_errors: dict[str, str] = {}
+
+        for name, result in zip(names, results):
+            if isinstance(result, BaseException):
+                if isinstance(result, asyncio.CancelledError):
+                    raise result
+                agent_errors[name] = type(result).__name__
+                log_event(
+                    "agent.failed",
+                    level=logging.ERROR,
+                    agent=name,
+                    error_type=type(result).__name__,
+                )
+                values[name] = None
+            else:
+                values[name] = result
+
+        classification = values["classification"]
+        quality_assessment = values["quality"]
+        compliance_assessment = values["compliance"]
+        summary_assessment = values["summary"]
+
+        quality = None
+        if quality_assessment is not None:
+            quality_assessment = validate_quality_evidence(
                 quality_assessment,
-                compliance_assessment,
-                summary_assessment,
-            ) = await asyncio.gather(*tasks)
-        except BaseException:
-            for task in tasks:
-                if not task.done():
-                    task.cancel()
-            await asyncio.gather(*tasks, return_exceptions=True)
-            raise
+                transcript,
+            )
+            quality = calculate_quality_result(quality_assessment)
 
-        quality_assessment = validate_quality_evidence(
-            quality_assessment,
-            transcript,
-        )
-
-        quality = calculate_quality_result(
-            quality_assessment
-        )
-
-        compliance_assessment = (
-            validate_compliance_evidence(
+        compliance = None
+        if compliance_assessment is not None:
+            compliance_assessment = validate_compliance_evidence(
                 compliance_assessment,
                 transcript,
             )
-        )
+            compliance = build_compliance_result(compliance_assessment)
 
-        compliance = build_compliance_result(
-            compliance_assessment
-        )
-        summary = normalize_summary_result(
-            summary_assessment
-        )
+        summary = None
+        if summary_assessment is not None:
+            summary = normalize_summary_result(summary_assessment)
 
-        return AnalysisResult(
-            transcript=transcript,
+        return CallAnalysisResult(
             classification=classification,
             quality=quality,
             compliance=compliance,
             summary=summary,
+            transcript=transcript,
+            agent_errors=agent_errors,
         )

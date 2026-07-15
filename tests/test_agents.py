@@ -10,10 +10,10 @@ from app.agents import (
 )
 from app.schemas import (
     ClassificationResult,
-    ComplianceResult,
+    ComplianceAssessment,
     QualityAssessment,
     QualityResult,
-    SummaryResult,
+    SummaryAssessment,
     TranscriptSegment,
 )
 
@@ -30,8 +30,8 @@ def test_agents_define_prompts_and_result_schemas() -> None:
     cases = (
         (ClassificationAgent, ClassificationResult),
         (QualityAgent, QualityAssessment),
-        (ComplianceAgent, ComplianceResult),
-        (SummarizerAgent, SummaryResult),
+        (ComplianceAgent, ComplianceAssessment),
+        (SummarizerAgent, SummaryAssessment),
     )
 
     for agent_type, result_model in cases:

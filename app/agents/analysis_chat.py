@@ -1,7 +1,7 @@
 import json
-import os
 import re
 
+from app.config import AppSettings
 from app.llm.client import LLMClient
 
 
@@ -29,8 +29,10 @@ class AnalysisChatAgent:
         max_question_chars: int = 8_000,
     ) -> None:
         self.llm_client = llm_client
-        self.max_context_chars = max_context_chars or int(
-            os.getenv("CHAT_CONTEXT_MAX_CHARS", "40000")
+        self.max_context_chars = (
+            max_context_chars
+            if max_context_chars is not None
+            else AppSettings.from_env().runtime.chat_context_max_chars
         )
         self.max_question_chars = max_question_chars
 

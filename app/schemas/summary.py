@@ -1,6 +1,6 @@
 from enum import StrEnum
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, Field
 
 
 class ActionItemOwner(StrEnum):
@@ -52,43 +52,12 @@ class SummaryAssessment(BaseModel):
         min_length=20,
         max_length=2000,
         description=(
-            "Краткое резюме разговора из 3–5 предложений."
+            "Краткое резюме разговора на русском языке. "
+            "Рекомендуемый объём — от трёх до пяти предложений."
         ),
     )
 
     action_items: list[ActionItem] = Field(
         default_factory=list,
         max_length=10,
-    )
-
-    @model_validator(mode="after")
-    def validate_summary_sentences(
-        self,
-    ) -> "SummaryAssessment":
-        sentence_count = _count_sentences(
-            self.summary
-        )
-
-        if not 3 <= sentence_count <= 5:
-            raise ValueError(
-                "Summary must contain from 3 to 5 sentences."
-            )
-
-        return self
-
-
-def _count_sentences(value: str) -> int:
-    import re
-
-    sentences = re.findall(
-        r"[^.!?]+[.!?]+|[^.!?]+$",
-        value.strip(),
-    )
-
-    return len(
-        [
-            sentence
-            for sentence in sentences
-            if sentence.strip()
-        ]
     )

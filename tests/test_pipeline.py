@@ -1,9 +1,46 @@
 import asyncio
-import threading
-from types import MethodType
+import json
+from types import MethodType, SimpleNamespace
 
-from pipelines.pipeline import Pipeline
-from app.schemas import AudioSource
+from app.config import AppSettings
+from app.schemas import AnalyzeResponse
+from app.openwebui import (
+    OpenWebUIRequestHandler,
+    OpenWebUIRequestParser,
+    OpenWebUIResponseFormatter,
+)
+from pipelines.pipeline import Pipeline, PipelineRuntime
+
+
+class ImmediateBridge:
+    def run(self, coroutine):
+        return asyncio.run(coroutine)
+
+    def stream(self, operation):
+        chunks: list[str] = []
+        result = asyncio.run(operation(chunks.append, None))
+        return iter([*chunks, result])
+
+
+class FakeHandler:
+    async def handle(self, request, *, progress=None, cancel_event=None):
+        if progress is not None:
+            progress("Файл получен.\n\n")
+            progress("Анализ готов.\n\n")
+        return "FINAL"
+
+
+def test_valves_use_shared_settings_without_duplicating_defaults(
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("WHISPER_MODEL", "small")
+    monkeypatch.setenv("MAX_CONCURRENT_AUDIO_JOBS", "3")
+
+    valves = Pipeline.Valves.from_settings(AppSettings.from_env())
+
+    assert valves.WHISPER_MODEL == "small"
+    assert valves.MAX_CONCURRENT_AUDIO_JOBS == 3
+    assert valves.WHISPER_DEVICE == "cpu"
 
 
 def test_pipeline_requires_async_startup() -> None:
@@ -19,49 +56,23 @@ def test_pipeline_requires_async_startup() -> None:
     assert result == "Pipeline не был корректно инициализирован."
 
 
-def test_pipeline_streams_progress_before_final_result() -> None:
+def test_pipeline_only_routes_streaming_request() -> None:
     pipeline = Pipeline()
-    pipeline.downloader = object()
-    pipeline.transcriber = object()
-    pipeline.diarizer = object()
-
-    loop = asyncio.new_event_loop()
-    thread = threading.Thread(target=loop.run_forever)
-    thread.start()
-    pipeline._event_loop = loop
-
-    async def fake_pipe_async(
-        self,
-        user_message,
-        model_id,
-        messages,
-        body,
-        progress=None,
-        cancel_event=None,
-    ):
-        progress("Файл получен.\n\n")
-        await asyncio.sleep(0.01)
-        progress("Анализ готов.\n\n")
-        return "FINAL"
-
-    pipeline._pipe_async = MethodType(
-        fake_pipe_async,
-        pipeline,
+    pipeline.runtime = PipelineRuntime(
+        llm_client=SimpleNamespace(),
+        analysis_service=SimpleNamespace(),
+        handler=FakeHandler(),
+        bridge=ImmediateBridge(),
     )
 
-    try:
-        chunks = list(
-            pipeline.pipe(
-                user_message="<file />",
-                model_id="test",
-                messages=[],
-                body={"stream": True},
-            )
+    chunks = list(
+        pipeline.pipe(
+            user_message="",
+            model_id="test",
+            messages=[],
+            body={"stream": True},
         )
-    finally:
-        loop.call_soon_threadsafe(loop.stop)
-        thread.join()
-        loop.close()
+    )
 
     assert chunks == [
         "Файл получен.\n\n",
@@ -70,25 +81,75 @@ def test_pipeline_streams_progress_before_final_result() -> None:
     ]
 
 
-def test_detects_openwebui_internal_task() -> None:
-    assert Pipeline._internal_task(
+def test_openwebui_analysis_uses_same_json_contract_as_api() -> None:
+    response = AnalyzeResponse.model_validate(
         {
-            "stream": False,
-            "metadata": {"task": "query_generation"},
+            "transcript": [
+                {
+                    "speaker": "Оператор",
+                    "start": 0.0,
+                    "end": 1.0,
+                    "text": "Добрый день.",
+                }
+            ],
+            "classification": {"topic": "карты", "priority": "low"},
+            "quality_score": {
+                "total": 100,
+                "checklist": {
+                    "greeting": True,
+                    "need_detection": True,
+                    "solution_provided": True,
+                    "farewell": True,
+                },
+            },
+            "compliance": {"passed": True, "issues": []},
+            "summary": "Звонок обработан.",
+            "action_items": [],
         }
-    ) == "query_generation"
-    assert Pipeline._internal_task(
-        {"stream": True, "metadata": {}}
-    ) is None
+    )
+    formatter = OpenWebUIResponseFormatter()
+    formatter.response_mapper = SimpleNamespace(map=lambda _: response)
+
+    rendered = formatter.analysis(None)
+
+    assert json.loads(rendered) == response.model_dump(mode="json")
+    assert formatter.latest_analysis(
+        [{"role": "assistant", "content": rendered}]
+    ) == response.model_dump_json(indent=2)
 
 
-def test_non_stream_audio_request_is_not_processed() -> None:
-    pipeline = Pipeline()
-    pipeline.downloader = object()
-    pipeline.transcriber = object()
-    pipeline.diarizer = object()
+def test_request_parser_prioritizes_internal_task() -> None:
+    parser = OpenWebUIRequestParser()
+    request = parser.parse(
+        user_message=(
+            '<file type="file" url="file-id" '
+            'content_type="audio/mpeg" name="call.mp3" />'
+        ),
+        model_id="pipeline",
+        messages=[],
+        body={
+            "stream": True,
+            "metadata": {"task": "query_generation"},
+        },
+    )
 
-    result = pipeline.pipe(
+    assert request.internal_task == "query_generation"
+    assert request.audio_source is None
+
+
+def make_handler(max_jobs: int = 1) -> OpenWebUIRequestHandler:
+    return OpenWebUIRequestHandler(
+        downloader=SimpleNamespace(),
+        analysis_service=SimpleNamespace(),
+        chat_agent=SimpleNamespace(),
+        llm_client=SimpleNamespace(),
+        formatter=OpenWebUIResponseFormatter(),
+        max_concurrent_audio_jobs=max_jobs,
+    )
+
+
+def test_handler_skips_non_stream_audio_request() -> None:
+    request = OpenWebUIRequestParser().parse(
         user_message=(
             '<file type="file" url="file-id" '
             'content_type="audio/mpeg" name="call.mp3" />'
@@ -98,76 +159,57 @@ def test_non_stream_audio_request_is_not_processed() -> None:
         body={"stream": False},
     )
 
+    result = asyncio.run(make_handler().handle(request))
+
     assert "streaming-запросе" in result
 
 
-def test_audio_jobs_are_limited_and_queued() -> None:
+def test_handler_limits_audio_jobs_and_reports_queue() -> None:
     async def scenario() -> None:
-        pipeline = Pipeline()
-        pipeline._audio_semaphore = asyncio.Semaphore(1)
-
+        handler = make_handler(max_jobs=1)
+        parser = OpenWebUIRequestParser()
         first_started = asyncio.Event()
         release_first = asyncio.Event()
         active_jobs = 0
         max_active_jobs = 0
 
-        async def fake_process_audio(
-            self,
-            source,
-            *,
-            progress=None,
-            cancel_event=None,
-        ):
+        async def fake_analyze(self, request, progress, cancel_event):
             nonlocal active_jobs, max_active_jobs
             active_jobs += 1
             max_active_jobs = max(max_active_jobs, active_jobs)
             try:
-                if source.file_id == "first":
+                if request.audio_source.file_id == "first":
                     first_started.set()
                     await release_first.wait()
-                return source.file_id
+                return request.audio_source.file_id
             finally:
                 active_jobs -= 1
 
-        pipeline._process_audio = MethodType(
-            fake_process_audio,
-            pipeline,
-        )
+        handler._analyze_audio = MethodType(fake_analyze, handler)
 
-        first = asyncio.create_task(
-            pipeline._process_audio_with_limit(
-                AudioSource(
-                    file_id="first",
-                    filename="first.wav",
-                    content_type="audio/wav",
-                )
+        def request(file_id: str):
+            return parser.parse(
+                user_message=(
+                    f'<file type="file" url="{file_id}" '
+                    f'content_type="audio/wav" name="{file_id}.wav" />'
+                ),
+                model_id="pipeline",
+                messages=[],
+                body={"stream": True},
             )
-        )
-        await first_started.wait()
 
+        first = asyncio.create_task(handler.handle(request("first")))
+        await first_started.wait()
         queued_progress: list[str] = []
         second = asyncio.create_task(
-            pipeline._process_audio_with_limit(
-                AudioSource(
-                    file_id="second",
-                    filename="second.wav",
-                    content_type="audio/wav",
-                ),
-                progress=queued_progress.append,
-            )
+            handler.handle(request("second"), progress=queued_progress.append)
         )
         await asyncio.sleep(0)
 
         assert not second.done()
-        assert queued_progress == [
-            pipeline.presenter.format_progress("audio_queued")
-        ]
-
+        assert queued_progress == [handler.formatter.progress("audio_queued")]
         release_first.set()
-        assert await asyncio.gather(first, second) == [
-            "first",
-            "second",
-        ]
+        assert await asyncio.gather(first, second) == ["first", "second"]
         assert max_active_jobs == 1
 
     asyncio.run(scenario())

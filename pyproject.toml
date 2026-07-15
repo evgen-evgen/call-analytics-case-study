@@ -10,7 +10,9 @@ dependencies = [
     "httpx>=0.28.1",
     "openai>=1.68.0",
     "pyannote-audio>=4.0.7",
+    "prometheus-client>=0.21.0",
     "pytest>=9.1.1",
     "pytest-asyncio>=0.23.0",
     "python-multipart==0.0.20",
+    "jiwer>=4.0.0",
 ]

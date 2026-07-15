@@ -60,9 +60,6 @@ services:
     build:
       context: .
       dockerfile: Dockerfile.pipelines
-      # BuildKit's bridge traffic is intercepted by the local Tailscale policy
-      # routes. Host networking is used only while installing build packages.
-      network: host
 
     container_name: mtbank-pipelines
     restart: unless-stopped
@@ -83,7 +80,6 @@ services:
     build:
       context: .
       dockerfile: Dockerfile.pipelines
-      network: host
     container_name: mtbank-analysis-api
     restart: unless-stopped
     entrypoint:

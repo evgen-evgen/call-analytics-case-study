@@ -43,11 +43,6 @@ OPENWEBUI_API_KEY=...
 PUBLIC_BASE_URL=http://localhost:5000
 ```
 
-Запуск всего стека одной командой:
-
-```bash
-docker compose up -d --build
-```
 
 Первый запуск занимает больше времени из-за загрузки моделей Whisper и
 pyannote. Состояние сервисов можно проверить командой:

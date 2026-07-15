@@ -335,9 +335,13 @@ class LLMClient:
     async def _create_completion(self, **kwargs):
         for attempt in range(self._rate_limit_max_retries + 1):
             try:
-                async with self._request_semaphore:
+                with operation("llm.queue.wait", model=self.model):
+                    await self._request_semaphore.acquire()
+                try:
                     async with asyncio.timeout(self._request_timeout_seconds):
                         return await self.client.chat.completions.create(**kwargs)
+                finally:
+                    self._request_semaphore.release()
             except RateLimitError as exc:
                 if attempt >= self._rate_limit_max_retries:
                     raise
